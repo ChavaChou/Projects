@@ -1,0 +1,1544 @@
+---
+title: 'EDA HW2 - Clustering Analysis for Sun Country Airlines'
+author: 'Group 6: Nitin Wahie, Aadarsh Gupta, Chia-Hsuan Chou, Patrick Hoban, Rekha
+  Mohandass, Kexin Liang'
+date: "10/20/2019"
+output:
+  pdf_document: 
+    df_print: paged
+    latex_engine: xelatex
+toc: true
+---
+
+# Business Problem
+## Situation
+Sun Country Airlines is a low-cost vacation airline in the United States, and the 11^th^ largest in the United States by passengers carried. It is based out of the Minneapolis–Saint Paul International Airport and headquartered in nearby Eagan, Minnesota. The airline operates 86 routes between destinations across the United States, Mexico, Central America and the Caribbean. 
+
+Sun Country Airlines focuses on two main parts. First, the development of digital marketing and technologies to engage customers and generate revenue. This includes online booking through Sun Country’s consumer-facing website, third-party marketing channels, and B2B channels and partnerships with resort, tour, and hotel operators. Second, it focusses on the company’s loyalty program, Ufly Rewards, which is an effort to build brand loyalty among travelers and win repeat business. Although not unique in the industry, Ufly Rewards was a strategic piece for a carrier so closely identified with a specific geographic market, namely the Minneapolis-St. Paul metro area.
+
+Over the years, the company has improved their booking website, upgraded some critical back-end technology systems, and revisited the mix of traditional marketing and new media the company used to attract attention in a very competitive marketplace. And they want to do more to survive into its fourth decade.
+
+Overall, Sun Country wants to enhance customer experience by developing new membership packages for their customers and attracting new users based on their understanding of their customers.
+
+
+## Complication
+Across the years, the teams have coalesced around what they believed to be the needs, wants, and behaviors of Sun Country’s customers. However, these beliefs were based on largely anecdotal information and often inspired internal debates about what customers really want. Due in part to the company’s tumultuous recent past, not enough time or resources had been invested in developing and validating customer profiles.
+
+Lack of customer knowledge significantly hampered the teams' digital marketing and advertising efforts. They does not have a solid understanding of who their users are and how they behave. Sun Country has not looked at their data to build user profiles. However, they knew there was more work to be done to make Sun Country successful and competitive in the long term.
+
+
+## Key Question
+How can Sun Country analyze the de-identified data and to tease out insights related to customer segments, travel patterns, and any other useful points that might be revealed?
+
+* Sub-Questions
+
+  * Where does the value come from?
+
+  * Are there different segments of customers? How do they differ from each other?
+
+  * What marketing strategies can be employed towards different customer segments to increase enrollment of Ufly Rewards program and traffic to SCA website?
+
+# Our Approach
+We use clustering analysis to do the customer segmentation, achieving high intra-similarity and low inter-similarity. 
+
+Then, based on the customer clusters we have, we do analysis to find out each cluster's unique customer characteristics (such as age, gender, and UFly membership status) and behavior features (such as booking channel, frequent flight time and destination).
+
+Finally, we use the analysis results to solve the problems above, provide Sun Country with recommendations on designing different marketing strategies to attract different kinds of customers and differentiating itself from competitors.
+
+
+# Data Preparation
+## Data Cleaning
+
+In reviewing the data, we found a few issues right-off that needed to be resolved. Null values are present in gender, birthdate and UFlyMember Status columns.  Additionally we found outliers in the Age column that are simply logically impossible.  
+
+```{r, warning=FALSE, results='hide', message=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(maps)
+library(rgeos)
+library(maptools)
+library(ggmap)
+library(geosphere)
+library(plotly)
+library(lubridate)
+library(scales)
+library(extrafont)
+library(showtext)
+library(magrittr)
+library(RColorBrewer)
+library(forcats)
+library(ggthemes)
+library(clustMixType)
+```
+
+```{r, eval=FALSE}
+data = read.csv("SunCountry.csv")
+
+# Removing rows with null birthdateid
+Data<-data%>%filter(!is.na(birthdateid))
+
+# Removing rows with no GenderCode
+Data$GenderCode=as.character(Data$GenderCode)
+Data %>%  filter(!is.na(Data$GenderCode))
+
+# Changing the age to median age for impossible ages
+Data$Age[Data$Age < 0] <- median(Data$Age)
+Data$Age[Data$Age > 120] <- median(Data$Age)
+
+# Ufly Member Status:
+Data$UflyMemberStatus <- as.character(Data$UflyMemberStatus)
+Data$UflyMemberStatus[Data$UflyMemberStatus=='']='Non-Members'
+
+# Duplicate PNRs
+# Retain only rows with single occurrence of PNRLocatorID, CouponSeqNbr, PaxName,
+# ServiceStartCity, ServiceEndCity, ServiceStartDate
+Data1=Data%>% group_by(PNRLocatorID, CouponSeqNbr, PaxName, ServiceStartCity, 
+                       ServiceEndCity, ServiceStartDate) %>%filter(n()==1)
+
+# Take everything not known and make it other.
+Data1$BookingChannel = as.character(Data1$BookingChannel)
+Data1$BookingChannel[Data1$BookingChannel != "Outside Booking" &
+                       Data1$BookingChannel != "SCA Website Booking"] = "Others"
+
+# We are only concerned with Airline Code SY
+Data1$MarketingAirlineCode = as.character(Data1$MarketingAirlineCode)            
+Data1 <- Data1[Data1$MarketingAirlineCode == 'SY',]
+
+# Dealing with teansactions where CouponSeqNbr is more than 1
+Data1 <- Data1 %>% group_by(PNRLocatorID) %>%
+mutate(flag = ifelse(min(CouponSeqNbr) != 1, 1, 0)) %>% filter(flag == 0)
+  
+# Create a Unique Identifier for Customer
+Data1$customer_id <- paste(Data1$birthdateid,Data1$GenderCode,Data1$EncryptedName)
+save(Data1, file='CleanedData.RData')
+
+table(as.factor(Data1$GenderCode))
+Data1 = Data1 %>%
+  filter(GenderCode != 'U')
+Data1$GenderCode = as.factor(Data1$GenderCode)
+Data1$UflyMemberStatus = as.factor(Data1$UflyMemberStatus)
+Data1$MarketingAirlineCode = as.character(Data1$MarketingAirlineCode)
+Data1 = Data1 %>%
+  filter(MarketingAirlineCode == 'SY')
+Data1$MarketingAirlineCode = as.factor(Data1$MarketingAirlineCode)
+Data1$BookingChannel = as.factor(Data1$BookingChannel)
+Data1 = Data1 %>%
+  select(-flag)
+```
+
+### Result of Cleaning
+Rows without a gender data code were removed as were rows where birthday was null.  Null values in member-status were replaced with a value of Non-Member. Impossible ages, those below 0 and above 120 were replaced with the median age of the total data set.  Duplicate row entries where PNR, Coupon sequence number, Service start city and service end city were all the same were removed. A unique ID was created for each customer using birthday, gender and encrypted name. Finally all columns were appropriately adjusted to be set as factors or as character where needed.
+
+## Data Sampling
+There are more than 3 million records in the original data. Dealing with such a large scale dataset is extremely slow. We randomly sample from the original cleaned dataset based on 20,000 unique PNRLocatorID, and use it for the analysis going forward.
+```{r,include=FALSE}
+load('/Users/kexinliang/Desktop/MSBA6410-EDAV/hw2/Rcode/CleanedData.RData')
+```
+```{r, eval=FALSE}
+# sample
+Data1$PNRLocatorID = as.character(Data1$PNRLocatorID)
+uniquePNRs = unique(Data1$PNRLocatorID)
+set.seed(1234567)
+sample_PNRs = sample(uniquePNRs, 10000)
+sample_data = Data1 %>%
+  filter(PNRLocatorID %in% sample_PNRs)
+sample_data$PNRLocatorID = as.factor(sample_data$PNRLocatorID)
+colnames(sample_data)
+colnames(sample_data)[20] = 'UFlyMemberStatus'
+sample_data$ServiceStartDate = as.Date(sample_data$ServiceStartDate, format = "%m/%d/%y")
+sample_data$PNRCreateDate = as.Date(sample_data$PNRCreateDate, format = "%m/%d/%y")
+sample_data$FlightMonth = strftime(sample_data$ServiceStartDate, "%B")
+sample_data$BookingMonth = strftime(sample_data$PNRCreateDate, "%B")
+
+# write as csv
+write.csv(sample_data, 'flight_level_data.csv')
+```
+
+### Flight-level Data
+We now have a CSV file of sample data to work on. There are 55,781 rows of data in total after we finished the sampling. The approach to solving the problem remains the same, but sampling helps save time.
+
+
+## Transforming to create Customer-level Data
+
+### Motivation
+Sun Country Airlines has always had a focus on customer first. Leveraging data to better understand customer behavior and build customer profiles will be important.
+
+Since the original dataset is based on per flight, there are many duplicated columns for each customer. For example, if a customer had several lay-overs and stop-overs during the whole trip, there will be several rows in the dataset for this particular customer having his/her information repeated (such as age and gender). This data format is highly redundant and can't be directly used for clustering analysis and customer segementation.
+
+So we need to transform the original flight-level data to the customer-level data by combining the multiple flights within one trip.
+
+### Process
+
+#### Finding the True Destination
+
+First, we define the true origin, true destination and final destination for each customer per trip with the following assumptions:
+* True origin is the initial place where customer first takes Sun Country flights.
+* True destination is the place where the customer stays for the longest time.
+* Final destination is the final place where the customer last takes Sun Country flights.
+
+For example, if a local of Minneapolis took Sun Country Airline to New York for a 10-day trip, but he had a 2-day stop-over in Chicago, and finally he came back to Minneapolis when the trip was over. In this case, the true origin and final destination both are Minneapolis. The true destination should be New York because the customer stayed in New York for the longest time, meaning New York was likely the desired travel destination.
+
+
+```{r, eval=FALSE}
+######### true origin and destination #######
+
+sample_data = read.csv('flight_level_data.csv')
+# str(sample_data)
+sample_data$ServiceStartDate = as.Date(sample_data$ServiceStartDate, format = "%m/%d/%y")
+sample_data$PNRCreateDate = as.Date(sample_data$PNRCreateDate, format = "%m/%d/%y")
+
+### true origin - the initial flight place per customer
+true_origins = sample_data %>%
+  arrange(PNRLocatorID, CouponSeqNbr) %>%
+  group_by(PNRLocatorID, PaxName) %>%
+  do(data.frame(true_origin = first(.$ServiceStartCity)))
+
+sample_data = merge(sample_data, true_origins,
+                    by.x = c('PNRLocatorID','PaxName'), 
+                    by.y = c('PNRLocatorID','PaxName'))
+
+### final destination - the final flight place per customer
+diff1 = sample_data %>%
+  arrange(PNRLocatorID, CouponSeqNbr) %>%
+  group_by(PNRLocatorID, PaxName) %>%
+  mutate(stay = lead(ServiceStartDate) - ServiceStartDate, default = 0) %>%
+  select(PNRLocatorID, PaxName, ServiceStartCity, 
+         ServiceEndCity, ServiceStartDate, CouponSeqNbr, stay)
+
+final_destinations = diff1 %>%
+  group_by(PNRLocatorID, PaxName) %>%
+  do(data.frame(final_destination = .$ServiceEndCity[is.na(.$stay)]))
+
+sample_data = merge(sample_data, final_destinations,
+                    by.x = c('PNRLocatorID','PaxName'), 
+                    by.y = c('PNRLocatorID','PaxName'))
+
+### true destination - the place where customer really want to go
+diff1$stay[is.na(diff1$stay)] = 0
+diff1$stay = as.numeric(diff1$stay)
+true_destinations = diff1 %>%
+  group_by(PNRLocatorID, PaxName) %>%
+  do(data.frame(true_destination = .$ServiceEndCity[.$stay == max(.$stay)],
+                Booked_Class = .$BkdClassOfService[.$stay == max(.$stay)]))
+
+sample_data = merge(sample_data, true_destinations,
+                    by.x = c('PNRLocatorID','PaxName'), 
+                    by.y = c('PNRLocatorID','PaxName'))
+```
+
+#### Round-Trip vs One-Way Travel
+
+We define a trip as round-trip or one-way based on whether or not the final destination is the same as the origin.  If they are the same, it's round-trip, otherwise it's defined as one-way trip.
+
+```{r, eval=FALSE}
+################## round-trip or one-way ###############
+str(sample_data)
+summary(sample_data)
+sample_data$true_origin = as.character(sample_data$true_origin)
+sample_data$final_destination = as.character(sample_data$final_destination)
+sample_data$trip_type = ifelse(sample_data$true_origin == sample_data$final_destination, 
+                               'round-trip', 'one-way')
+sample_data$true_origin = as.factor(sample_data$true_origin)
+sample_data$final_destination = as.factor(sample_data$final_destination)
+sample_data$trip_type = as.factor(sample_data$trip_type)
+
+################# days_pre_booked ##################
+str(sample_data)
+sample_data = sample_data %>%
+  group_by(PNRLocatorID, PaxName) %>%
+  mutate(FlightDate = first(ServiceStartDate), 
+         days_pre_booked = first(ServiceStartDate) - PNRCreateDate)
+```
+
+#### Group vs Individual Travel
+
+Here we calculate how many people book and travel together in a particular trip and define it as group size, which gives an actual count of persons traveling together. Next, we add a column named group type to show if this trip is an individual trip or group trip based on the group size.
+
+```{r, eval=FALSE}
+################### group_size ###############
+group_sample = sample_data %>%
+  select(PNRLocatorID, PaxName, customer_id, Age, GenderCode, PNRCreateDate, FlightDate,
+         true_origin, true_destination, trip_type, days_pre_booked,
+         BookingChannel, TotalDocAmt, UFlyMemberStatus, Booked_Class) %>%
+  distinct()
+
+group_sample = group_sample %>%
+  group_by(PNRLocatorID) %>%
+  mutate(group_size = n())
+
+################# Group Type ####################
+group_sample$group_type = ifelse(group_sample$group_size == 1, 'individual', 'group')
+group_sample$group_type = as.factor(group_sample$group_type)
+```
+
+#### Identifying Time Parameters
+
+We define seasons for each customer trip based on spring, summer, fall and winter with three months given to each season. Additionally, we added columns for booking season, flight season, and month traveled for further analysis.
+
+```{r,eval=FALSE}
+################# Seasonality ###################
+getSeason <- function(DATES) { 
+  WS <- as.Date("2012-12-15", format = "%Y-%m-%d") # Winter Solstice 
+  SE <- as.Date("2012-3-15", format = "%Y-%m-%d") # Spring Equinox 
+  SS <- as.Date("2012-6-15", format = "%Y-%m-%d") # Summer Solstice 
+  FE <- as.Date("2012-9-15", format = "%Y-%m-%d") # Fall Equinox 
+  # Convert dates from any year to 2012 dates 
+  d <- as.Date(strftime(DATES, format="2012-%m-%d")) 
+  ifelse (d >= WS | d < SE, "Q4", ifelse (d >= SE & d < SS, "Q1", 
+                                          ifelse (d >= SS & d < FE, "Q2", "Q3")))
+  }
+group_sample$FlightSeasonality = getSeason(group_sample$FlightDate)
+group_sample$FlightMonth = strftime(group_sample$FlightDate, "%B")
+group_sample$BookingSeasonality = getSeason(group_sample$PNRCreateDate)
+group_sample$BookingMonth = strftime(group_sample$PNRCreateDate, "%B")
+
+### Check, there are no duplicates
+sum(duplicated(group_sample$PNRLocatorID,group_sample$PaxName))
+
+### Write as a CSV
+write.csv(group_sample, 'customer_level_data.csv')
+```
+
+### Result of Data Transformation
+
+After the data transformation, we now have **customer-level data** containing the PNRLocatorID, PaxName, customer id, Age, GenderCode, booking date, flight date, true origin, true destination, trip type, days pre booked, booking channel, total DocAmt, UFlyMemberStatus, booked class of service, group size, group type, flight season, flight month, booking seasona, booking month.
+
+## Data Overview
+
+```{r}
+flight_level = read.csv('flight_level_data.csv')
+customer_level = read.csv('customer_level_data.csv')
+```
+
+#### Flight-level Data
+
+Each row represents a single flight, and a particular customer can have multiple flights for one trip.
+
+```{r}
+colnames(flight_level)
+```
+```{r}
+table(flight_level$ServiceStartCity)
+```
+```{r}
+table(flight_level$ServiceEndCity)
+```
+```{r}
+table(flight_level$GenderCode)
+```
+```{r}
+summary(flight_level$Age)
+```
+```{r}
+table(flight_level$BkdClassOfService)
+```
+```{r}
+table(flight_level$BookingChannel)
+```
+```{r}
+summary(flight_level$TotalDocAmt)
+```
+```{r}
+table(flight_level$UFlyMemberStatus)
+```
+
+
+#### Customer-level Data
+
+Each row represents a particular customer with his/her whole trip.
+```{r}
+colnames(customer_level)
+```
+```{r}
+summary(customer_level$Age)
+```
+```{r}
+table(customer_level$GenderCode)
+```
+```{r}
+table(customer_level$true_origin)
+```
+```{r}
+table(customer_level$true_destination)
+```
+```{r}
+table(customer_level$trip_type)
+```
+```{r}
+summary(customer_level$days_pre_booked)
+```
+```{r}
+table(customer_level$BookingChannel)
+```
+```{r}
+summary(customer_level$TotalDocAmt)
+```
+```{r}
+table(customer_level$UFlyMemberStatus)
+```
+```{r}
+summary(customer_level$group_size)
+```
+```{r}
+table(customer_level$group_type)
+```
+```{r}
+table(customer_level$FlightSeasonality)
+```
+```{r}
+table(customer_level$BookingSeasonality)
+```
+```{r}
+table(customer_level$Booked_Class)
+```
+
+
+# Exploratory Analysis
+
+We begin by creating a custom theme for our EDA and presentation. This will align our visual outputs with Sun Country standards in terms of color and font to demonstrate a professionally branded level of execution.
+
+
+## EDA based on flight-level data
+
+### How are various booking channels performing in terms of number of flights sold?
+
+Looking into performance of the various booking channels, we start by examining flight count by booking channel.
+
+```{r}
+################# PLOT FLIGHTS AGAINST BOOKING CHANNEL ###################
+# Graph of Flight Count by Booking Channel
+flight_sample = flight_level
+flights_per_channel <- flight_sample %>%
+  group_by(BookingChannel) %>%
+  count(BookingChannel)
+
+# head(flights_per_channel)
+
+ggplot(flights_per_channel, aes(x=BookingChannel, y=n)) + 
+  geom_bar(stat = "identity", na.rm=TRUE, fill="#f58232") +
+  ggtitle("Flight Count by Booking Channel") +
+  xlab("Booking Channel") + ylab("Flights")+theme_classic()
+```
+
+**Interpretation:** Here we see a nearly equal number of flights being purchased through the website and outside booking channels.
+
+
+### How does revenue look across booking channels?
+
+Given an approximately equal number of flights booked by outside booking channel and the website, we would expect to see the revenue from both channels as approximately equivalent.
+
+```{r}
+# Graph of Revenue by Booking Channel
+transaction_sample = customer_level
+ggplot(transaction_sample, aes(x=BookingChannel, y=TotalDocAmt)) + 
+  geom_bar(stat = "identity", na.rm=TRUE, fill="#f58232") +
+  ggtitle("Revenue by Booking Channel") +
+  xlab("Booking Channel") + ylab("Revenue") + theme_classic()
+```
+
+**Interpretation:** Looking a little deeper we see that even though the number of flights being booked is similar.  The revenue coming from the Sun Country Website is far greater.  Now that we have a better understanding of how customers are booking. Let's see where they are going.
+
+
+### How does travel change by season?
+
+Graphing out flights by month we start loooking for any peaks or anomalies in the data.
+
+```{r}
+# Selecting only the required columns
+sdata = Data1[c('CouponSeqNbr','ServiceStartCity','ServiceEndCity',
+                'ServiceStartDate','PNRCreateDate','Age','BookingChannel',
+                'UflyMemberStatus','customer_id')]
+
+sdata$ServiceStartDate = ymd(sdata$ServiceStartDate)
+sd  = sdata %>% select(ServiceStartDate) %>% group_by(ServiceStartDate) %>%
+  summarize(total = n())
+sdata$month = month(sdata$ServiceStartDate)
+
+sd_my =  sdata %>% group_by(year(ServiceStartDate),month(ServiceStartDate)) %>%
+  summarize(total = n())
+colnames(sd_my) = c('Year','Month','Total')
+
+sp = ggplot(sd_my,aes(x=Month,y=Total)) + geom_line(color="#004885",size=1) +
+  facet_wrap(~Year) + theme_gray() 
+sp + scale_x_continuous(breaks=seq(1,12)) +
+  scale_y_continuous(labels = comma) + theme_classic()
+# Peaks Observed in March, July and December
+```
+
+**Interpretation:** We observe a similar flying pattern for both the years of analysis with peaks observed in months of March, July and December.
+
+### What drives the seasonal peaks in March?
+
+Digging deeper into these months specifically we are looking for patterns in demography and destinations. Starting with March.
+
+```{r, warning = FALSE}
+# Subsetting Data
+sdata_March = sdata %>%  filter(month==3)
+sdata_March$ServiceStartCity = as.character(sdata_March$ServiceStartCity)
+sdata_March$ServiceEndCity = as.character(sdata_March$ServiceEndCity)
+
+# Loading airports geo codes to visually analyze routes. 
+# (https://openflights.org/data.html#airport)
+geo = read.csv('Lat-Long.csv')
+sdata_March1 = merge(sdata_March,geo,by.x='ServiceStartCity',by.y='Airport_Short')  
+sdata_March1 = sdata_March1 %>%  select(ServiceStartCity,ServiceEndCity,
+                                        ServiceStartDate,Age,BookingChannel,
+                                        UflyMemberStatus,customer_id,Lat,Long )
+sdata_March1 = sdata_March1 %>% rename(lat1 =Lat,lon1=Long)
+sdata_March1 = merge(sdata_March1,geo,by.x='ServiceEndCity',by.y='Airport_Short')
+sdata_March1 = sdata_March1 %>% rename(lat2 =Lat,lon2=Long)
+
+# Grouping by flight routes
+sn = sdata_March1 %>%  group_by(ServiceStartCity,ServiceEndCity) %>% mutate(count1=n())
+sn = sn %>%
+  select(ServiceStartCity,ServiceEndCity,lat1,lon1,lat2,lon2,count1) %>% ungroup()
+sn = unique(sn) 
+
+#Plotting Route Network Graph
+data <- map_data("usa")
+ggplot(data, aes(long, lat, group = group)) +
+geom_polygon(fill="black", color = "white", size=0.15) +
+geom_curve(data = sn, aes(x = lon1, xend = lon2,
+                          y = lat1,  yend = lat2,
+                                       ), alpha=0.25,
+          color = "white", inherit.aes = FALSE) +
+    theme(plot.background=element_rect(fill="black"), legend.position="none") +
+    coord_equal() + theme_void() + theme(legend.position="none")
+
+# As canbe observed Minnesapolis is the starting point for most of the flights routes.
+
+# Lets look at their exact numbers
+sn$route = paste(sn$ServiceStartCity,'-',sn$ServiceEndCity)
+sn1 = sn %>% select(route,count1) %>%  arrange(desc(count1) ) %>% top_n(10, count1)
+ggplot(sn1, aes(x=reorder(route,-count1),y=count1))+
+  geom_bar(stat="identity",fill="#004885") +
+  labs(y="Total Number", x = "Top 10 Routes") + theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(labels = comma) 
+
+```
+
+
+**Interpretation:** Looking at the graphs, the most frequent routes for the month of March are Las Vegas, South Florida and Cancun, Mexico. These are all vacation destinations.
+
+There is a potential here to use this information to cusomize our marketing campaigns to target customers.  We could potentially build customized packages by collaborating with hotels at these popular destinations and offer discount to cutomers who are Ufly members or book through our website. But let's not get ahead of ourselves.  Lets' dig further into these routes to better understand our flyers for targeting campaigns.
+
+#### Are customers with different ages drawn to different locations?
+
+We'll start by looking at age variations across destinations for people traveling during this March Spring Break time frame specifically. We break out the ages according to generation to try to identify appropriate culture buckets.
+
+```{R}
+sd_las = sdata_March1[sdata_March1$ServiceStartCity=='LAS'|
+                        sdata_March1$ServiceEndCity=='LAS',]
+sd_las$age_bucket = cut(sd_las$Age, 
+                        breaks = c(-Inf,18,30,40,54,74,Inf),
+                        labels = c('Children', 'Young Millenials', 
+                                   'Old Millenials', 'Gen X', 
+                                   'Baby Boomers', 'Aged'))
+sd_rsw = sdata_March1[sdata_March1$ServiceStartCity=='RSW'|
+                        sdata_March1$ServiceEndCity=='RSW',]
+sd_rsw$age_bucket = cut(sd_rsw$Age,
+                        breaks = c(-Inf,18,30,40,54,74,Inf),
+                        labels = c('Children', 'Young Millenials', 
+                                    'Old Millenials', 'Gen X', 
+                                    'Baby Boomers', 'Aged'))
+sd_cun = sdata_March1[sdata_March1$ServiceStartCity=='CUN'|
+                        sdata_March1$ServiceEndCity=='CUN',]
+sd_cun$age_bucket = cut(sd_cun$Age,
+                        breaks = c(-Inf,18,30,40,54,74,Inf),
+                        labels = c('Children', 'Young Millenials', 
+                                   'Old Millenials', 'Gen X', 
+                                   'Baby Boomers', 'Aged'))
+                                    
+# LA Age Group Distribution
+ggplot(sd_las,aes(age_bucket)) +
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") + 
+scale_y_continuous(labels=scales::percent) + 
+  ylab('%Total') + xlab('Age Group')+ theme_classic() +  
+theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle('Las Vegas Flyers Age Distribution')
+```
+**Interpretation:**  GenX and Baby Boomers are the most frequent Las Vegas travelers, but are closely followed by Young Millenials. There's an opportunity to target some of these specific groups, but this is still a fairly large age range running from 18 to 54.  
+
+```{r}
+# Florida Age Group Distribution
+ggplot(sd_rsw,aes(age_bucket)) +
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") + 
+scale_y_continuous(labels=scales::percent) +ylab('%Total') + 
+  xlab('Age Group')+ theme_classic() +  
+theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle('Florida Flyers Age Distribution')
+```
+**Interpretation:**  We see a large number of Baby Boomers, Gen X and Children traveling to Florida at this time. We can interpret this as families traveling to Florida with their children on vacation. This could be an opportunity to target married people with children between the ages of 40 and 54 when advertising this destination.
+
+```{r}
+# Cancun, Mexico Age Group Distribution
+ggplot(sd_cun,aes(age_bucket)) + 
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") + 
+scale_y_continuous(labels=scales::percent) +ylab('%Total') + 
+  xlab('Age Group')+ theme_classic() +  
+theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle('Cancun Flyers Age Distribution')
+```
+
+**Interpretation:**  Interestingly we see similar demographics to that of Florida when looking at Cancun. However, here we see a trend slightly younger in age with fewer Baby Boomers, but far greater numbers of Gen X traveling potentially with their children.
+
+#### Are booking channel choices used for spring break travel the same as those we saw previously when looking at all travel?
+
+Let's now look at the kind of booking channels these Spring Break destination travelers are using to book their flights.
+
+```{R}
+# Booking Channel
+# LA Booking Channel
+ggplot(sd_las,aes(BookingChannel)) + 
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") + 
+scale_y_continuous(labels=scales::percent) + ylab('%Total') + 
+  theme_classic() + 
+  ggtitle('Las Vegas Flyers Booking Channel Distribution')
+```
+
+**Interpretation:** Las Vegas travellers are booking using other channels more than 50% of the time. Knowing this is less profitable. There is an opportunity to drive more of these travelers to book using our website.
+
+```{R}
+################# Cancun, Mexico Booking Channel
+ggplot(sd_cun,aes(BookingChannel)) + 
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") + 
+  scale_y_continuous(labels=scales::percent) + 
+  ylab('%Total') + 
+  theme_classic() + 
+  ggtitle('Cancun Flyers Booking Channel Distribution')
+```
+
+**Interpretation:** Cancun is even worse than Las Vegas.  Here we see only a little over 20% of our travelers are booking with us directly through our website.  Definitely an opportunity to drive more traffic to book through the website directly.
+
+```{R, warning = FALSE}
+# Florida Booking Channel
+ggplot(sd_rsw,aes(BookingChannel)) + 
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") + 
+  scale_y_continuous(labels=scales::percent) + 
+  ylab('%Total') + 
+  theme_classic() + 
+  ggtitle('Florida Flyers Booking Channel Distribution')
+```
+
+**Interpretation:** Thankfully Florida travelers are already booking through our website in large part (60%).  Certainly still an opportunity, but not a first priority.  Pehaps we can partner with marketing to understand what is driving this difference currently and find a way to repeat this for Vegas and Cancun.
+
+It's also important to note that we did analyze the Ufly membership status as well, but there could not find any difference worth reporting.
+
+Now that we have some understanding of which customers we might want to target, we'll need to understand when we should be reaching out to them.
+
+#### When are Spring Break travelers typically booking their trips?
+
+In order to target customers, we also would like to know when to send out advertisement and offer packages. So let's look at the lag time between  travel date  and booking date.
+
+```{R}
+# Las Vegas 
+sd_las1 = sdata_March[sdata_March$ServiceStartCity=='LAS'|
+                        sdata_March$ServiceEndCity=='LAS',]
+sd_las1$PNRCreateDate = ymd(sd_las1$PNRCreateDate)
+sd_las1$BookingLagTime = difftime(sd_las1$ServiceStartDate,sd_las1$PNRCreateDate,
+                                      unit='days')
+sd_las1$BookingLagTime = as.numeric(sd_las1$BookingLagTime/30)
+sd_las1$Lag_Buket = cut(sd_las1$BookingLagTime,c(0,2,4,6))
+ggplot(sd_las1,aes(Lag_Buket))+
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") +  
+  ylab('%Total') +
+  scale_y_continuous(labels=scales::percent) + 
+  theme_classic() + 
+  ggtitle('Las Vegas Flyers Lag Time Distribution')
+```
+
+**Interpretation:** We see most travelers to Las Vegas bookign between 0 and 2 months before their travel date. 35% are booking more than 2 months out. For Las Vegas Flights it appears we'll want to target these travelers in the four months prior to March beginning in November.
+
+```{R}
+#Florida
+sd_rsw = sdata_March[sdata_March$ServiceStartCity=='RSW'|
+                       sdata_March$ServiceEndCity=='RSW',]
+sd_rsw$PNRCreateDate = ymd(sd_rsw$PNRCreateDate)
+sd_rsw$BookingLagTime = difftime(sd_rsw$ServiceStartDate,sd_rsw$PNRCreateDate,
+                                  unit='days')
+sd_rsw$BookingLagTime = as.numeric(sd_rsw$BookingLagTime/30)
+sd_rsw$Lag_Buket = cut(sd_rsw$BookingLagTime,c(0,2,4,6))
+ggplot(sd_rsw,aes(Lag_Buket))+
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") +
+  ylab('%Total') +
+  scale_y_continuous(labels=scales::percent) + theme_classic() + 
+  ggtitle('Florida Flyers Lag Time Distribution')
+```
+
+**Interpretation:** Florida travelers are booking slightly further out. With only 30% of travelers booking within two months of their vacation. Florida has the longest lead time and suggests we should begin targeting these customers more than 6 months in advance.
+
+```{R}
+#Cancun
+sd_cun = sdata_March[sdata_March$ServiceStartCity=='CUN'|
+                       sdata_March$ServiceEndCity=='CUN',]
+sd_cun$PNRCreateDate = ymd(sd_cun$PNRCreateDate)
+sd_cun$BookingLagTime = difftime(sd_cun$ServiceStartDate,sd_cun$PNRCreateDate,
+                                 unit='days')
+sd_cun$BookingLagTime = as.numeric(sd_cun$BookingLagTime/30)
+sd_cun$Lag_Buket = cut(sd_cun$BookingLagTime,c(0,2,4,6))
+ggplot(sd_cun,aes(Lag_Buket))+
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") +
+  ylab('%Total') +
+  scale_y_continuous(labels=scales::percent) +
+  theme_classic() +
+  ggtitle('Cancun Flyers Lag Time Distribution')
+```
+
+
+**Interpretation:** Cancun travelers are booking closest to their date of travel. More than half are booking within 2 months of the travel date. For Cacun it's likely we'll want to begin targeting these travelers in December and January.
+
+We've found some interesting trends in March.  Next we move to the December peaks to see what differences exist in those trends.
+
+### What drives the seasonal peaks in December? 
+
+The second big peak in travel for Sun Country existed in December.  We can infer this is related to seasonal travel for the holidays, but let's dive into the data to confirm those hypotheses.
+
+```{R, warning=FALSE}
+sdata_Dec = sdata %>%  filter(month==12)
+sdata_Dec$ServiceStartCity = as.character(sdata_Dec$ServiceStartCity)
+sdata_Dec$ServiceEndCity = as.character(sdata_Dec$ServiceEndCity)
+write.csv(sdata_Dec, 'Dec_Subset.csv')
+geo = read.csv('Lat-Long.csv')
+sdata_Dec1 = merge(sdata_Dec,geo,by.x='ServiceStartCity',by.y='Airport_Short')  
+sdata_Dec1 = sdata_Dec1 %>%  select(ServiceStartCity,ServiceEndCity,
+                                      ServiceStartDate,Age,BookingChannel,
+                                      UflyMemberStatus,customer_id,Lat,Long )
+sdata_Dec1 = sdata_Dec1 %>% rename(lat1 =Lat,lon1=Long)
+sdata_Dec1 = merge(sdata_Dec1,geo,by.x='ServiceEndCity',by.y='Airport_Short')
+sdata_Dec1 = sdata_Dec1 %>% rename(lat2 =Lat,lon2=Long)
+
+sn = sdata_Dec1 %>%  
+  group_by(ServiceStartCity,ServiceEndCity) %>% 
+  mutate(count1=n())
+sn = sn %>% 
+  select(ServiceStartCity,ServiceEndCity,lat1,lon1,lat2,lon2,count1) %>% 
+  ungroup()
+sn = unique(sn) 
+
+data <- map_data("usa")
+ggplot(data, aes(long, lat, group = group)) +
+  geom_polygon(fill="black", color = "white", size=0.15) +
+  geom_curve(data = sn, aes(x = lon1, xend = lon2,
+                            y = lat1,  yend = lat2,
+  ), alpha=0.25,
+  color = "white", inherit.aes = FALSE) +
+  theme(plot.background=element_rect(fill="black"), legend.position="none") +
+  coord_equal() + theme_void() + theme(legend.position="none")
+
+sn$route = paste(sn$ServiceStartCity,'-',sn$ServiceEndCity)
+sn1 = sn %>% select(route,count1) %>%  arrange(desc(count1) ) %>% top_n(10,count1)
+
+ggplot(sn1, aes(x=reorder(route,-count1),y=count1))+
+  geom_bar(stat="identity",fill="#004885") +
+  labs(y="Total Number", x = "Top 10 Routes") + theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(labels = comma)
+```
+
+
+
+
+**Interpretation:** Most frequent routes for the month of December are New York, Los Angeles and San Franscico. It seems like these are people coming back home for Christmas as these routes are more typical of young people returning home from the large cities where they work in order to spend the holidays with their parents and families.
+
+Looking at age distributions should help us confirm these assumptions. 
+
+#### Are customer ages for December travelers consistent with those of young professionals?
+
+Once again we'll bucket out ages based on generation to give us a culturally appropriate breakout.
+
+```{R}
+sd_jfk = sdata_Dec1[sdata_Dec1$ServiceStartCity=='JFK'|sdata_Dec1$ServiceEndCity=='JFK',]
+sd_jfk$age_bucket = cut(sd_jfk$Age,
+                        breaks = c(-Inf,18,30,40,54,74,Inf), 
+                        labels = c('Children', 'Young Millenials', 
+                                    'Old Millenials', 'Gen X', 
+                                    'Baby Boomers', 'Aged'))
+
+sd_lax = sdata_Dec1[sdata_Dec1$ServiceStartCity=='LAX'|sdata_Dec1$ServiceEndCity=='LAX',]
+sd_lax$age_bucket = cut(sd_lax$Age,
+                        c(-Inf,18,30,40,54,74,Inf), 
+                        labels = c('Children', 'Young Millenials', 
+                                    'Old Millenials', 'Gen X', 
+                                    'Baby Boomers', 'Aged'))
+
+sd_SFO = sdata_Dec1[sdata_Dec1$ServiceStartCity=='SFO'|sdata_Dec1$ServiceEndCity=='SFO',]
+sd_SFO$age_bucket = cut(sd_SFO$Age,
+                        c(-Inf,18,30,40,54,74,Inf), 
+                        labels = c('Children', 'Young Millenials', 
+                                    'Old Millenials', 'Gen X', 
+                                    'Baby Boomers', 'Aged'))
+# NY Age Group Distribution
+ggplot(sd_jfk,aes(age_bucket)) + 
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") + 
+scale_y_continuous(labels=scales::percent) + 
+  ylab('%Total') + xlab('Age Group')+theme_classic()+  
+theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle('New York Flyers Age Distribution')
+
+#Los Angeles Age Distribution
+ggplot(sd_lax,aes(age_bucket)) + 
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") + 
+  scale_y_continuous(labels=scales::percent) + 
+  ylab('%Total') + xlab('Age Group')+theme_classic()+  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle('Los Angeles Flyers Age Distribution')
+
+# San Franscico Age Distribution
+ggplot(sd_SFO,aes(age_bucket)) + 
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") + 
+  scale_y_continuous(labels=scales::percent) + 
+  ylab('%Total') + xlab('Age Group')+theme_classic()+  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle('San Fransico Flyers Age Distribution')
+
+```
+
+
+**Interpretation:** When we look at New York, Los Angeles and San Francisco, the pattern on age distribution is reassuringly consistent across all three locaitons. Around 50% of the flyers are Millenial between 18 to 40 age group. The location and age group are indeed consistent with our previous hypothesis that these are most likely young professionals coming home for Christmas celebrations.
+
+Let’s now look at the kind of booking channels they use to book their flights.
+
+#### Are these young professionals booking on our website?
+
+Knowing that travel booked on the website is more profitable. We want to understand how well Sun Country is doing at driving these sales from their website as opposed to other booking channels.
+
+```{R}
+############## Booking Channels Distribution
+
+# New York
+ggplot(sd_jfk,aes(BookingChannel)) + 
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") + 
+  scale_y_continuous(labels=scales::percent) + ylab('%Total') + 
+  theme_classic() + ggtitle('New York Flyers Booking Channel Distribution')
+
+# Los Angeles
+ggplot(sd_lax,aes(BookingChannel)) + 
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") + 
+  scale_y_continuous(labels=scales::percent) + ylab('%Total') + 
+  theme_classic() + ggtitle('Los Angeles Flyers Booking Channel Distribution')
+
+# San Fransico
+ggplot(sd_SFO,aes(BookingChannel)) + 
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") + 
+  scale_y_continuous(labels=scales::percent) + ylab('%Total') + 
+  theme_classic() + ggtitle('San Francisco Flyers Booking Channel Distribution')
+
+```
+
+
+**Interpretation:** Again we see relative consistency in choice of booking channel across all three cities for the month of December. Around 40% of the people travelling used SCA website for their bookings and around 20% of them have Ufly membership. Still more however still used the outside booking channel. Certainly another opportunity to target customers in an effort to get them to convert to using the Sun Country website directly when booking their flights.
+
+In order to target these customers, we also would again like to know when we should begin advertising to convert and capture as many of these travelers as possible. So let’s look at the lag time between travel date and booking date.
+
+#### When are these young professionals typically booking their trips home for the holidays?
+
+We'll look again at the three largest destination cities to identify any differences that may exist by booking date.
+
+```{R}
+##################### New York 
+sd_jfk1 = sdata_Dec[sdata_Dec$ServiceStartCity=='JFK'|sdata_Dec$ServiceEndCity=='JFK',]
+sd_jfk1$PNRCreateDate = ymd(sd_jfk1$PNRCreateDate)
+sd_jfk1$BookingLagTime = difftime(sd_jfk1$ServiceStartDate,sd_jfk1$PNRCreateDate,
+                                  unit='days')
+sd_jfk1$BookingLagTime = as.numeric(sd_jfk1$BookingLagTime/30)
+sd_jfk1$Lag_Buket = cut(sd_jfk1$BookingLagTime,c(0,2,4,6))
+ggplot(sd_jfk1,aes(Lag_Buket))+
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") +  
+  ylab('%Total') +
+scale_y_continuous(labels=scales::percent) + 
+  theme_classic() + ggtitle('New York Vegas Flyers Lag Time Distribution')
+
+##################### Los Angeles
+sd_lax = sdata_Dec[sdata_Dec$ServiceStartCity=='LAX'|sdata_Dec$ServiceEndCity=='LAX',]
+sd_lax$PNRCreateDate = ymd(sd_lax$PNRCreateDate)
+sd_lax$BookingLagTime = difftime(sd_lax$ServiceStartDate,sd_lax$PNRCreateDate,
+                                 unit='days')
+sd_lax$BookingLagTime = as.numeric(sd_lax$BookingLagTime/30)
+sd_lax$Lag_Buket = cut(sd_lax$BookingLagTime,c(0,2,4,6))
+ggplot(sd_lax,aes(Lag_Buket))+
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") +  
+  ylab('%Total') +
+  scale_y_continuous(labels=scales::percent) + 
+  theme_classic() + ggtitle('Los Angeles Flyers Lag Time Distribution')
+
+################# San Fransico
+sd_sfo = sdata_Dec[sdata_Dec$ServiceStartCity=='SFO'|sdata_Dec$ServiceEndCity=='SFO',]
+sd_sfo$PNRCreateDate = ymd(sd_sfo$PNRCreateDate)
+sd_sfo$BookingLagTime = difftime(sd_sfo$ServiceStartDate,sd_sfo$PNRCreateDate,
+                                 unit='days')
+sd_sfo$BookingLagTime = as.numeric(sd_sfo$BookingLagTime/30)
+sd_sfo$Lag_Buket = cut(sd_sfo$BookingLagTime,c(0,2,4,6))
+ggplot(sd_sfo,aes(Lag_Buket))+
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") +  
+  ylab('%Total') +
+  scale_y_continuous(labels=scales::percent) + 
+  theme_classic() + ggtitle('San Fransico Flyers Lag Time Distribution')
+
+```
+
+**Interpretation:** There is relative consistency again across the three cities as we look into how far in advance travelers are booking their flights home. Most appear to be booking within two months of their December flight dates.  This suggests that ideally we begin targeting these customers as far out as 4 months but we ramp up those advertising initiatives in October and November.
+
+At this point we've been able to identify some key aspects of peak travel for the airline and the individuals that are flying with Sun Country. However, UFlyMembership still seems to be evading us and we haven't been able to identify any significant patterns between the UFlyMembership program and the travelers we have booking with us.  
+
+In an attempt to try to find out more about the UFlyMemberhsip rewards and it's impacts, we'll move over to the customer level data to see if we can identify some of the trends that evaded us to this point.
+
+## EDA based on customer-level data
+
+### Looking into the UFly Memberships
+
+With the focus on driving the rewards program and extract more benefits from our high value and frequent flyers, we also dive into the behavior of members in three different classes, *Elite, Standard* and *Non-Members*
+
+
+
+#### What do the current membership level counts look like? 
+
+Let's start with looking at just how many members are currently in each level of the UFlyMembership class.
+
+
+```{r}
+member_group <- Data1 %>% 
+  group_by(UflyMemberStatus, customer_id, ) %>% 
+  summarise (total = n()) %>% 
+  group_by(UflyMemberStatus) %>% 
+  summarise(tot = n())
+
+ggplot(member_group, aes(x = reorder(UflyMemberStatus,tot), tot)) +
+  geom_bar(stat = "identity", fill = "#f58232") + theme_classic() + 
+  coord_flip() + 
+  geom_text(aes(label = tot), position = position_dodge(width = 0.9), hjust = -0.25) +
+  labs(title = "Members in each UflyMembership  class ") + ylab("") + 
+  xlab("") + 
+  theme(axis.line = element_blank(), axis.text.x = element_blank(), 
+        axis.ticks = element_blank()) + 
+  scale_y_continuous(limits = c(0,1500000))
+```
+
+
+**Interpretation:** From the above plot, we see that major portion of our flyers in the last two years is constituted by the Non-Members, and only about 20% carrying a membership. Of those, the elite class is less than 1%.
+
+This leads us to explore more about the statistics of different classes
+
+#### Transaction value for different membership classes?
+
+We look to see how much members in each class spending for a trip and what is the total revenue they are generating for SunCountry. Here, we look at the whole duration of data, and therefore the change in the ticket cost over time and other behaviors related to moetary fluctuations are ignored.
+
+
+```{r}
+Mem_group1<- Data1 %>%
+  group_by(customer_id, UflyMemberStatus) %>%
+  summarise(Total_Doc = sum(TotalDocAmt))
+
+Mem_group2 <- Mem_group1 %>%
+  group_by(UflyMemberStatus) %>%
+  summarise(Sum_Doc = round(sum(Total_Doc)/1000000,0), Avg_Doc = round(mean(Total_Doc),0))
+
+```
+
+```{r}
+## Total Doc_Amt for each membership type
+ggplot(Mem_group2, aes(x = reorder(UflyMemberStatus,Sum_Doc),Sum_Doc)) + 
+  geom_bar(stat = "identity", fill = "#004885") + theme_classic() + coord_flip() +
+  geom_text(aes(label = Sum_Doc), position = position_dodge(width = 0.2), hjust = -0.5) +
+  labs(title = "Total Revenue (M) through different Ufly memberships") + 
+  xlab("") + ylab("") + 
+#  geom_label(aes(label = Sum_Doc), label.size = 0.15,) + #hjust = 0.5, vjust = 1.25) + 
+  theme(axis.line = element_blank(), 
+        axis.text.x = element_blank(), axis.ticks = element_blank(),
+        legend.position = "none") + ylim(0,900) 
+        
+```
+
+
+**Interpretation:** Total revenue in millions gives us a picture that non-members are generating almost 75 percent of our total revenue. Seems to be a potential conversion problem and perhaps we might want to make joining the UFlyProgram easier and more rewarding for these travelers when we have them on board.
+
+But how much is that conversion to membership worth to us?
+
+```{r}
+## Avg Doc_Amt by different memberships
+ggplot(Mem_group2, aes(x = reorder(UflyMemberStatus,Avg_Doc),Avg_Doc)) + 
+  geom_bar(stat = "identity", fill = '#004885') + theme_classic() +coord_flip() + 
+#  geom_label(aes(label = Avg_Doc), label.size = 0.15, hjust = 0.75) + 
+  geom_text(aes(label = Avg_Doc), position = position_dodge(width = 0.2), hjust = -0.15) +
+  labs(title = "Average Spend per transaction for Ufly Membership classes ") + 
+  ylab("") + xlab("") + 
+  theme(axis.line = element_blank(), 
+        axis.text.x = element_blank(), axis.ticks = element_blank(),
+        legend.position = "none") + ylim(0,6000)
+
+```
+
+
+**Interpretation:** Looking at the average transaction amount broken out by membership level. We see that elite members are much more valuable than others. For every transaction, they spend about 6 times a standard Ufly member and about 8 times more than a Non-member. 
+
+This gives us sufficient motivation to look at how we might increase the Elite memberships in SunCountry.
+
+
+#### Are elite members truly traveling more frequently as well as spending more?
+
+We want to pull out the number of transactions for each class of membership at this point to see if membership and loyalty do go hand in hand as expected.
+
+```{r, include=FALSE}
+load('/Users/kexinliang/Desktop/MSBA6410-EDAV/hw2/std_group.RData')
+load('/Users/kexinliang/Desktop/MSBA6410-EDAV/hw2/elite_group.RData')
+load('/Users/kexinliang/Desktop/MSBA6410-EDAV/hw2/nonmem_group.RData')
+```
+
+```{r, eval=FALSE}
+### ---How many transactions per member each class has?--- ###
+
+elite_group <- Data1 %>% filter(UflyMemberStatus == 'Elite') %>%
+  group_by(UflyMemberStatus, customer_id) %>% 
+  summarise (total = n()) %>%
+  arrange(desc(total))
+
+std_group <- Data1 %>% filter(UflyMemberStatus == 'Standard') %>%
+  group_by(UflyMemberStatus, customer_id) %>% 
+  summarise (total = n()) %>%
+  arrange(desc(total))
+
+nonmem_group <- Data1 %>% filter(UflyMemberStatus == 'Non-Members') %>%
+  group_by(UflyMemberStatus, customer_id) %>% 
+  summarise (total = n()) %>%
+  arrange(desc(total))
+```
+
+```{r}
+Data1_group <- nonmem_group <- Data1 %>% 
+  group_by(UflyMemberStatus, customer_id) %>% 
+  summarise (total = n())
+
+par(mfrow =(c(1,3)))
+hist(elite_group$total, col = "#004885", xlim = c(1,60), breaks = 25, 
+     xlab = "Transactions", ylab = "Number of customers", main = "Elite group")
+
+hist(std_group$total, col = "#004885",  xlim = c(1,60), breaks  = 15, 
+     xlab = "Transactions", ylab = "Number of customers", main = "Standard group")
+
+hist(nonmem_group$total, col = "#004885",  xlim = c(1,60), breaks = 25, 
+     xlab = "Transactions", ylab = "Number of customers", main = "Non Members")
+
+
+```
+
+
+**Interpretation:** Transactions are more spread out for members in the Elite class. So we have Elite members booking at various levels. Some have booked more than 60 times, but disturbingly, there are over 600 elite members that have booked 5 or fewer trips with us. Thi suggests the elite membership status is not always translating to loyalty the way we would hope.
+
+Still it is demonstrating some level of loyalty as there are more transactions on average for elite members than for standard members or non-members where the number of transactions per customers dies rapidly after 5.
+
+Seeing this opportunity in loyalty is there a way we can better target these customers before their next flight? Perhaps if we have a better understanding of how far in advance they are booking.
+
+#### How early do elite members book their flights?
+
+```{r, include=FALSE}
+load('/Users/kexinliang/Desktop/MSBA6410-EDAV/hw2/just_elite.RData')
+```
+
+```{r, eval=FALSE}
+just_elite <- Data1 %>%
+  filter(UflyMemberStatus == 'Elite') %>%
+  select(-EncryptedName, -birthdateid, -PostalCode, -UFlyRewardsNumber, -flag)
+```
+
+```{r}
+
+just_elite_days <- just_elite %>% filter(CouponSeqNbr == 1) %>%
+  mutate(daysInAdv = as.Date(ServiceStartDate) - as.Date(PNRCreateDate)) %>%
+  filter(daysInAdv >= 0)
+
+ggplot(just_elite_days %>% filter(daysInAdv >=0), aes(as.numeric(daysInAdv))) + 
+  geom_histogram(fill = '#004885', bins = 20) + theme_classic() +
+  ylab("Number of Bookings") +
+  xlab("Days booked in advance")
+
+```
+
+**Interpretation:** There are a few members booking way in advance.  However, the majority of bookings follow the same pattern between 0 to 2 and 2 to 4 months out that we've seen previously at a total level. 
+
+Understanding that timing of booking aligns with most customers members and non-members, are there differences in other places? Perhaps in booking channel used.
+
+#### What Booking channels do they prefer?
+
+We would definitely hope and hypothesize that UFlyMembership is driving customers directly to our website to book their flights through our most profitable channel. Here we seek to identify whether or not that theory holds water.
+
+```{r}
+bkg_channel_group <- Data1 %>% group_by(UflyMemberStatus, BookingChannel) %>%
+  summarise(tot = n()) 
+
+grp1 <- bkg_channel_group %>% filter(UflyMemberStatus == 'Elite')
+grp1_1 <- grp1 %>%
+  mutate(perc =  100* tot / sum(grp1$tot))
+
+grp2 <- bkg_channel_group %>% filter(UflyMemberStatus == 'Standard')
+grp2_1 <- grp2 %>%
+  mutate(perc =  100* tot / sum(grp2$tot))
+
+grp3 <- bkg_channel_group %>% filter(UflyMemberStatus == 'Non-Members')
+grp3_1 <- grp3 %>%
+  mutate(perc =  100* tot / sum(grp3$tot))
+
+bkg_channel_mem_grp <- rbind(grp1_1,grp2_1, grp3_1)
+
+```
+
+```{r}
+ggplot(bkg_channel_mem_grp, aes(UflyMemberStatus, round(perc), fill = BookingChannel)) +
+  geom_bar(stat = "identity", position = position_dodge2(width = 0))+
+  theme_classic() + 
+  ylab("% Bookings") + xlab("Membership Type") + ylim(0,80) +
+  scale_fill_manual("Booking Channels", values = c( "Grey", "#f58232", "#004885")) + 
+  geom_text(aes(label = round(perc)), 
+            position = position_dodge2(width = 0.9), vjust = -0.5)
+
+```
+
+**Interpretation:** Thankfully we do see that both standard and elite members choose most frequently to book directly through our website. Non-members in that they come to the Sun Country environment through and outside booking (most likely driven by cheaper available flying options to their destinations). Demonstrating again an opportunity to increase revenue by converting more non-members into members.
+
+Question becomes how do we start that conversion are there differences between who are members are and who has not signed up? 
+
+
+#### Are membership classes different by age group?
+
+Looking at the age group distribution of the three classes we want to see what age group is dominant for each. Given that there are actual differences as we hypothesize.
+
+```{r}
+
+### Age ###  
+
+age_group <- Data1  %>% 
+  transform(age_group = cut(Age, 
+                            breaks = c(-Inf,18,30,40,54,75,Inf), 
+                            labels = c('Children (Under 18)',
+                                       'Young Millenials (19 - 30)', 
+                                       'Old Millenials (31 - 40)', 
+                                       'GenX (41-54)', 
+                                       'Baby Boomers (55-75)', 
+                                       'Aged (Above 75'))) %>%
+  group_by(UflyMemberStatus, age_group) %>%
+  summarise (tot = n())
+
+
+age_group_elite <- age_group %>% filter(UflyMemberStatus == 'Elite')
+age_group_elite_1 <- age_group_elite %>%
+  mutate (perc = tot/ sum(age_group_elite$tot))
+
+age_group_std <- age_group %>%  filter(UflyMemberStatus == 'Standard')
+age_group_std_1 <- age_group_std %>%
+  mutate (perc = tot/ sum(age_group_std$tot))
+
+age_group_nonmem <- age_group %>%
+  filter(UflyMemberStatus == 'Non-Members')
+age_group_nonmem_1 <- age_group_nonmem %>%
+  mutate (perc = tot/ sum(age_group_nonmem$tot))
+
+age_group_combine <- rbind(age_group_elite_1,age_group_std_1, age_group_nonmem_1)
+
+ggplot(age_group_combine, aes(UflyMemberStatus, perc, fill = age_group)) +
+  geom_bar(stat = "identity")+
+  theme_classic() + ylab("% Bookings") + xlab("Membership Type") + 
+  scale_fill_manual("Age Groups", 
+                    values = c('#E0E3E5',"#F5F5D5", "#F0E3A6",
+                               "#f58232", "#004885", "Black"))
+
+```
+
+
+**Interpretation:** Looking at the age-group distribution, we see that the Elite customer base is consitituted largely by the GenX generation.  This is actually suprising as we would have guessed that baby-boomers would have been the overwhelming majority of this segment.  Good to see that the UFlyMembership is appealing to a younger demographic than expected. However, as we look at people traveling with children, it's clear we're not capturing as many of those vacation travelers heading to Florida and Cancun during March as we would like.  Again there seems to be an opportunity to convert more of these travelers to UFlyMembers as they book flights with us or as we have them in the air.
+
+At this point we know why and where many of customers are flying.  We've identified that UFlyMembership drives profit for Sun Country both in the way those travelers book and in frequency. We've also identified that Sun Country has an opportunity to convert more of those current travelers to UFlyMembers. But where do we start? How do we identify those individuals flying with us that we would like to target with promotions to join the UFlyMembership Rewards program? This is where we move into clustering to see if we can better identify these potential new members.
+
+
+
+# How can we serve our customers better?
+So far, we have been looking at our customers from a viewpoint of a single metric (*Flying behavior, Membership type, etc*). However, no customer exhibits a behavior in isolation, and there are always more customers replicating the same behavior that is identified through a combination of their features. 
+
+## Can clustering help us find out more similar customers?
+Clustering the customer base on the basis of their transaction and flying patterns can help us uncover some more information shared by different groups of customers and lead us to devise customized strategies for each group.
+
+### Choose a proper K to run clusering
+**Assumption:** We assume that the records with days_pre_booked greater than 365 days as outliers.
+
+```{r, message=FALSE,results='hide',warning=FALSE}
+# choose columns to do clustering
+customer_level = customer_level[customer_level$days_pre_booked <= 365,]
+cluster_data = customer_level %>%
+  select(Age, GenderCode, trip_type, true_destination, days_pre_booked, BookingChannel,
+         TotalDocAmt, UFlyMemberStatus, group_type, Booked_Class, FlightMonth)
+
+# choose the K
+set.seed(1234)
+SSE_curve <- c()
+for (k in 1:10){
+  kpro <- kproto(cluster_data, k)
+  sse <- sum(kpro$withinss)
+  SSE_curve[k] <- sse
+}
+```
+```{r}
+plot(1:10, SSE_curve, type="b", xlab="Number of Clusters", ylab="SSE")
+```
+  
+  From the plot, we see that the sum of squared errors drops significantly at k=5, after which it starts to plateau. We thus select 5 as the number of clusters to perform clustering and create groups of customers.
+
+## Clustering Analysis
+```{r, results='hide'}
+set.seed(1234)
+kpro1 <- kproto(cluster_data, 5)
+center1 = data.frame(kpro1$centers)
+sse1 <- sum(kpro1$withinss)
+```
+```{r,results='hide'}
+set.seed(12345)
+kpro2 <- kproto(cluster_data, 5)
+center2 = data.frame(kpro2$centers)
+sse2 <- sum(kpro2$withinss)
+```
+```{r,results='hide'}
+set.seed(123456)
+kpro3 <- kproto(cluster_data, 5)
+center3 = data.frame(kpro3$centers)
+sse3 <- sum(kpro3$withinss)
+```
+```{r,results='hide'}
+set.seed(1)
+kpro4 <- kproto(cluster_data, 5)
+center4 = data.frame(kpro4$centers)
+sse4 <- sum(kpro4$withinss)
+```
+```{r}
+min(c(sse1,sse2,sse3,sse4))
+
+customer_level$cluster = kpro4$cluster
+```
+```{r, eval=FALSE}
+write.csv(customer_level, 'cluster_data.csv')
+```
+We try to set different seeds to get different random center for clustering each time, and choose the seed with the smallest SSE, which means that this cluster gives us the best segmentation.
+
+## Visualization Based on Clusters
+```{r,fig.height=4,fig.width=3}
+clprofiles(kpro4, cluster_data)
+```
+
+## Conclusion from Clustering
+Understanding the characterisitcs of each segment helps us to learn more about the customers in that segment and devise more cutomized and better suited strategies. Below we look at the results from customer segmentation and some recommendations on how to best use our segments for SunCountry's benefit?
+
+### Customer Segmentation
+We have identified 5 different groups of customers and each depicts statistics that will help us devise proper customer flights behavior.
+
+#### Cluster-1
+```{R}
+cd = read.csv('cluster_data_1.csv')
+# Cluster-1
+cd1 = subset(cd, cluster==1)
+#Age Group
+ggplot(cd1,aes(fct_infreq(Age_groups))) +
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") + 
+  scale_y_continuous(labels=scales::percent) +
+  ylab('%Total') + xlab('Age Group')+theme_classic()+  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle('Cluster 1 (Green) Age Distribution')
+
+#Route, Group_type
+cd2 = cd1 %>%  group_by(Route) %>% mutate(count1=n()) %>% ungroup()
+cd2 = cd2 %>%  group_by(Route,group_type) %>% mutate(count2=n())
+cd2 = cd2 %>% select(Route,group_type,count1,count2) %>% ungroup()
+cd2 = unique(cd2)
+cd2 = cd2 %>% arrange(count1) %>%  top_n(10,count1)
+
+ggplot(cd2, aes(x= reorder(Route,-count1), 
+                y = count2,fill=group_type,label=count2)) + 
+geom_bar(stat='identity')+   
+  theme_classic() + xlab("") +ylab(" Number of passengers")+ 
+geom_text(size = 3, position = position_stack(vjust = 0.1))
+
+# Months- Class Type
+cd3 = cd1 %>%  group_by(FlightMonth) %>% mutate(count1=n()) %>% ungroup()
+cd3 = cd3 %>%  group_by(FlightMonth,Booked_Class) %>% mutate(count2=n())
+cd3 = cd3 %>% select(FlightMonth,Booked_Class,count1,count2) %>% ungroup()
+cd3 = unique(cd3)
+cd3 = cd3 %>% arrange(count1) %>%  top_n(10,count1)
+
+ggplot(cd3, aes(x= reorder(FlightMonth,-count1), 
+                y = count2,fill=Booked_Class,label=count2)) + 
+  geom_bar(stat='identity')+ 
+  theme_classic() + xlab("") +ylab(" Number of passengers")+
+  geom_text(size = 3, position = position_stack(vjust = 0.1))
+
+#Memebers Vs Grouping Channel
+cd4 = cd1 %>%  group_by(UFlyMemberStatus) %>% mutate(count1=n()) %>% ungroup()
+cd4 = cd4 %>%  group_by(UFlyMemberStatus,BookingChannel) %>% mutate(count2=n())
+cd4 = cd4 %>% select(UFlyMemberStatus,BookingChannel,count1,count2) %>% ungroup()
+cd4 = unique(cd4)
+cd4 = cd4 %>% arrange(count1) %>%  top_n(10,count1)
+
+ggplot(cd4, aes(x= reorder(UFlyMemberStatus,-count1), 
+                y = count2,fill=BookingChannel,label=count2)) + 
+  geom_bar(stat='identity')+ 
+  theme_classic() + xlab("") +ylab(" Number of passengers") + 
+  geom_text(aes(label=ifelse(count2>15,count2,"")),size = 3, 
+            position = position_stack(vjust = 0.1))
+```
+
+**Cluster 1**: **Male Holiday Travelers** *(green)* This cluster constitutes male travelers taking round trips mostly in the month of December and booking tickets usually 15 - 40 days in advance. These passengers travel in groups and the trips are generally to places like Las Vegas and Orlando besides Minneapolis. These holiday travelers are Sun Country loyalists and mostly book the flights through Sun Country website.
+
+
+#### Cluster-2
+
+```{R}
+#Cluster 2
+cd1 = subset(cd, cluster==2)
+#Age Group
+ggplot(cd1,aes(fct_infreq(Age_groups))) + 
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") + 
+  scale_y_continuous(labels=scales::percent) +
+  ylab('%Total') + xlab('Age Group')+theme_classic()+  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle('Cluster 2 (Yellow) Age Distribution')
+
+#Route, Group_type
+cd2 = cd1 %>%  group_by(Route) %>% mutate(count1=n()) %>% ungroup()
+cd2 = cd2 %>%  group_by(Route,group_type) %>% mutate(count2=n())
+cd2 = cd2 %>% select(Route,group_type,count1,count2) %>% ungroup()
+cd2 = unique(cd2)
+cd2 = cd2 %>% arrange(count1) %>%  top_n(10,count1)
+
+ggplot(cd2, aes(x= reorder(Route,-count1), 
+                y = count2,fill=group_type,label=count2)) + 
+  geom_bar(stat='identity')+ 
+  theme_classic() + xlab("") +ylab(" Number of passengers") + 
+  geom_text(size = 3, position = position_stack(vjust = 0.1))
+
+# Months- Class Type
+cd3 = cd1 %>%  group_by(FlightMonth) %>% mutate(count1=n()) %>% ungroup()
+cd3 = cd3 %>%  group_by(FlightMonth,Booked_Class) %>% mutate(count2=n())
+cd3 = cd3 %>% select(FlightMonth,Booked_Class,count1,count2) %>% ungroup()
+cd3 = unique(cd3)
+cd3 = cd3 %>% arrange(count1) %>%  top_n(10,count1)
+
+ggplot(cd3, aes(x= reorder(FlightMonth,-count1), 
+                y = count2,fill=Booked_Class,label=count2)) + 
+  geom_bar(stat='identity')+ 
+  theme_classic() + xlab("") +ylab(" Number of passengers")+
+  geom_text(size = 3, position = position_stack(vjust = 0.1))
+
+#Memebers Vs Grouping Channel
+cd4 = cd1 %>%  group_by(UFlyMemberStatus) %>% mutate(count1=n()) %>% ungroup()
+cd4 = cd4 %>%  group_by(UFlyMemberStatus,BookingChannel) %>% mutate(count2=n())
+cd4 = cd4 %>% select(UFlyMemberStatus,BookingChannel,count1,count2) %>% ungroup()
+cd4 = unique(cd4)
+cd4 = cd4 %>% arrange(count1) %>%  top_n(10,count1)
+
+ggplot(cd4, aes(x= reorder(UFlyMemberStatus,-count1), 
+                y = count2,fill=BookingChannel,label=count2)) + 
+  geom_bar(stat='identity')+ 
+  theme_classic() + xlab("") +ylab(" Number of passengers") + 
+  geom_text(aes(label=ifelse(count2>15,count2,"")),size = 3, 
+            position = position_stack(vjust = 0.1))
+
+```
+
+**Cluster 2**: **Family Vacationers** *(yellow)* This cluster has a variety of travellers with more destinations.They also form the major portion of the elite rewards class and travel the most in March. People belonging to this cluster mostly travel in groups, with an almost equal proportion of male and female passengers taking round trips suggesting that they might constitute couples/families on vacations. Due to the elite class status, they are the only ones booking first class predominantly and thus, spend the most on their travels. These members show the largest variation in pre-booked days, meaning they are focused on getting a preferred class of travel to their destination and don't mind paying over the odds for it.
+
+#### Cluster-3
+```{R}
+#Cluster 3
+cd1 = subset(cd, cluster==3)
+#Age Group
+ggplot(cd1,aes(fct_infreq(Age_groups))) + 
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") + 
+  scale_y_continuous(labels=scales::percent) +
+  ylab('%Total') + xlab('Age Group')+theme_classic()+  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle('Cluster 3 (Purple) Age Distribution')
+
+#Route, Group_type
+cd2 = cd1 %>%  group_by(Route) %>% mutate(count1=n()) %>% ungroup()
+cd2 = cd2 %>%  group_by(Route,group_type) %>% mutate(count2=n())
+cd2 = cd2 %>% select(Route,group_type,count1,count2) %>% ungroup()
+cd2 = unique(cd2)
+cd2 = cd2 %>% arrange(count1) %>%  top_n(10,count1)
+
+ggplot(cd2, aes(x= reorder(Route,-count1), 
+                y = count2,fill=group_type,label=count2)) +
+  geom_bar(stat='identity')+ 
+  theme_classic() + xlab("") +ylab(" Number of passengers")+
+  geom_text(size = 3, position = position_stack(vjust = 0.1))
+
+# Months- Class Type
+cd3 = cd1 %>%  group_by(FlightMonth) %>% mutate(count1=n()) %>% ungroup()
+cd3 = cd3 %>%  group_by(FlightMonth,Booked_Class) %>% mutate(count2=n())
+cd3 = cd3 %>% select(FlightMonth,Booked_Class,count1,count2) %>% ungroup()
+cd3 = unique(cd3)
+cd3 = cd3 %>% arrange(count1) %>%  top_n(10,count1)
+
+ggplot(cd3, aes(x= reorder(FlightMonth,-count1), 
+                y = count2,fill=Booked_Class,label=count2)) + 
+  geom_bar(stat='identity')+ 
+  theme_classic() + xlab("") +ylab(" Number of passengers")+
+  geom_text(size = 3, position = position_stack(vjust = 0.1))
+
+#Memebers Vs Grouping Channel
+cd4 = cd1 %>%  group_by(UFlyMemberStatus) %>% mutate(count1=n()) %>% ungroup()
+cd4 = cd4 %>%  group_by(UFlyMemberStatus,BookingChannel) %>% mutate(count2=n())
+cd4 = cd4 %>% select(UFlyMemberStatus,BookingChannel,count1,count2) %>% ungroup()
+cd4 = unique(cd4)
+cd4 = cd4 %>% arrange(count1) %>%  top_n(10,count1)
+
+ggplot(cd4, aes(x= reorder(UFlyMemberStatus,-count1), 
+                y = count2,fill=BookingChannel,label=count2)) + 
+  geom_bar(stat='identity')+ 
+  theme_classic() + xlab("") +ylab(" Number of passengers") + 
+  geom_text(aes(label=ifelse(count2>15,count2,"")),size = 3, 
+            position = position_stack(vjust = 0.1))
+
+```
+
+**Cluster 3**: **Female Vacationers** *(purple)*  This cluster almost exclusively constitutes female passengers travelling in groups. Almost 22% of the flights are booked in summer, with trips to Las Vegas and Orlando. This group also constitues a good number of children travelling to Orlando, probably with the mothers.The members of this cluster prefer to book most of their flights through Sun Country and book round trips in a go.
+
+#### Cluster - 4
+```{R}
+#Cluster 4
+cd1 = subset(cd, cluster==4)
+#Age Group
+ggplot(cd1,aes(fct_infreq(Age_groups))) + 
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") + 
+  scale_y_continuous(labels=scales::percent) +
+  ylab('%Total') + xlab('Age Group')+theme_classic()+  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle('Cluster 4 (Red) Age Distribution')
+
+#Route, Group_type
+cd2 = cd1 %>%  group_by(Route) %>% mutate(count1=n()) %>% ungroup()
+cd2 = cd2 %>%  group_by(Route,group_type) %>% mutate(count2=n())
+cd2 = cd2 %>% select(Route,group_type,count1,count2) %>% ungroup()
+cd2 = unique(cd2)
+cd2 = cd2 %>% arrange(count1) %>%  top_n(10,count1)
+
+ggplot(cd2, aes(x= reorder(Route,-count1), 
+                y = count2,fill=group_type,label=count2)) + 
+  geom_bar(stat='identity')+ 
+  theme_classic() + xlab("") +ylab(" Number of passengers")+
+  geom_text(size = 3, position = position_stack(vjust = 0.1))
+
+# Months- Class Type
+cd3 = cd1 %>%  group_by(FlightMonth) %>% mutate(count1=n()) %>% ungroup()
+cd3 = cd3 %>%  group_by(FlightMonth,Booked_Class) %>% mutate(count2=n())
+cd3 = cd3 %>% select(FlightMonth,Booked_Class,count1,count2) %>% ungroup()
+cd3 = unique(cd3)
+cd3 = cd3 %>% arrange(count1) %>%  top_n(10,count1)
+
+ggplot(cd3, aes(x= reorder(FlightMonth,-count1), 
+                y = count2,fill=Booked_Class,label=count2)) + 
+  geom_bar(stat='identity')+ 
+  theme_classic() + xlab("") +ylab(" Number of passengers")+
+  geom_text(size = 3, position = position_stack(vjust = 0.1))
+
+#Memebers Vs Grouping Channel
+cd4 = cd1 %>%  group_by(UFlyMemberStatus) %>% mutate(count1=n()) %>% ungroup()
+cd4 = cd4 %>%  group_by(UFlyMemberStatus,BookingChannel) %>% mutate(count2=n())
+cd4 = cd4 %>% select(UFlyMemberStatus,BookingChannel,count1,count2) %>% ungroup()
+cd4 = unique(cd4)
+cd4 = cd4 %>% arrange(count1) %>%  top_n(10,count1)
+
+ggplot(cd4, aes(x= reorder(UFlyMemberStatus,-count1), 
+                y = count2,fill=BookingChannel,label=count2)) + 
+  geom_bar(stat='identity')+ 
+  theme_classic() + xlab("") +ylab(" Number of passengers") + 
+  geom_text(aes(label=ifelse(count2>15,count2,"")),size = 3, 
+            position = position_stack(vjust = 0.1))
+```
+
+**Cluster 4**: **Minnesotan Holiday Traveleres** *(red)* Male travellers majorly millenials who prefer to travel to Minneapolis solo mostly from New York, Los Angeles and San Fransico.The cluster members usually book the flights within 15 days of their travel date and travel one-way only. A vast majority of them travel in December and book their tickets through outside channels (70%), trying to grab the best deals available at the last minute. This could probably be professionals/students travelling to meet their families during holidays.
+
+#### Cluster - 5
+```{R}
+#Cluster 5
+cd1 = subset(cd, cluster==5)
+#Age Group
+ggplot(cd1,aes(fct_infreq(Age_groups))) + 
+  geom_bar(aes(y = (..count..)/sum(..count..)),fill="#004885") + 
+  scale_y_continuous(labels=scales::percent) +
+  ylab('%Total') + xlab('Age Group')+theme_classic()+  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle('Cluster 5 (Blue) Age Distribution')
+
+#Route, Group_type
+cd2 = cd1 %>%  group_by(Route) %>% mutate(count1=n()) %>% ungroup()
+cd2 = cd2 %>%  group_by(Route,group_type) %>% mutate(count2=n())
+cd2 = cd2 %>% select(Route,group_type,count1,count2) %>% ungroup()
+cd2 = unique(cd2)
+cd2 = cd2 %>% arrange(count1) %>%  top_n(10,count1)
+
+ggplot(cd2, aes(x= reorder(Route,-count1), 
+                y = count2,fill=group_type,label=count2)) + 
+  geom_bar(stat='identity')+ 
+  theme_classic() + xlab("") +ylab(" Number of passengers")+
+  geom_text(size = 3, position = position_stack(vjust = 0.1))
+
+# Months- Class Type
+cd3 = cd1 %>%  group_by(FlightMonth) %>% mutate(count1=n()) %>% ungroup()
+cd3 = cd3 %>%  group_by(FlightMonth,Booked_Class) %>% mutate(count2=n())
+cd3 = cd3 %>% select(FlightMonth,Booked_Class,count1,count2) %>% ungroup()
+cd3 = unique(cd3)
+cd3 = cd3 %>% arrange(count1) %>%  top_n(10,count1)
+
+ggplot(cd3, aes(x= reorder(FlightMonth,-count1), 
+                y = count2,fill=Booked_Class,label=count2)) + 
+  geom_bar(stat='identity')+ 
+  theme_classic() + xlab("") +ylab(" Number of passengers")+
+  geom_text(size = 3, position = position_stack(vjust = 0.1))
+
+#Members Vs Grouping Channel
+cd4 = cd1 %>%  group_by(UFlyMemberStatus) %>% mutate(count1=n()) %>% ungroup()
+cd4 = cd4 %>%  group_by(UFlyMemberStatus,BookingChannel) %>% mutate(count2=n())
+cd4 = cd4 %>% select(UFlyMemberStatus,BookingChannel,count1,count2) %>% ungroup()
+cd4 = unique(cd4)
+cd4 = cd4 %>% arrange(count1) %>%  top_n(10,count1)
+
+ggplot(cd4, aes(x= reorder(UFlyMemberStatus,-count1), 
+                y = count2,fill=BookingChannel,label=count2)) + 
+  geom_bar(stat='identity')+ 
+  theme_classic() + xlab("") +ylab(" Number of passengers") + 
+  geom_text(aes(label=ifelse(count2>15,count2,"")),size = 3, 
+            position = position_stack(vjust = 0.1))
+```
+**Cluster 5**:**Non Rewards Travelers** *(blue)* Non-rewards Members booking from outside SunCountry, travelling in a group and spend the least on their travels. They travel to locations like Cancun and Las Vegas, predominantly in groups with around 22% of the trips taken in winter. These groups constitue people in their 30s, mostly females. These members are specifically looking for the cheapest flying options. Most people are brought into Sun Country's domain by a third party website and many travel for no price, probably utilizing coupons/discounts offered by the third parties.
+
+
+
+
+##  Recommendations on segments
+
+### Develop new packages to appeal to customers on a different level
+
+**Holiday deals for Female Vacationers**
+
+The members in this segment travel very less frequently during the winter holiday period compared to other segments, most trips coinciding with the spring break. SunCountry should lay out winter holiday deals for these female travelers that can give two fold benefits:  
+
+* Increased traffic on SunCountry website
+
+* More revenue opportunity with group travels and round-trips
+  
+  
+**Round-trip deals for the Male Holiday Travelers**
+
+Create customized rewards for solo Male travellers to Minneapolis to entice them into booking round-trips from SunCountry instead of one-way trips. With these members booking the flights very close to the travel date, there is a good dynamic revenue opportunity from the two-way flights. Such deals on Sun Country website could help make this website popular amongst members of this segment.  
+  
+   
+**Clearance Ticket Flash Sale for the Non Member Travelers**
+
+
+With the focus on getting the cheapest deals, the Non-Members of Ufly Rewards can be brought into the platform by offering flash sale on tickets close to the travel date exclusively on SunCountry website, available only to the customers who become Ufly members.  
+
+
+**One for the rich families - Family Vacationers**
+
+The current Elite members often travel through the First Class and have no bound of spends. Family package offerings to other members in this segment during the spring break will help to infuse more members into the Elite class. A travel plan that includes a round trip to Cancun can be coupled with accomodation partnerships with local area.  
+
+**Homecoming deals for the Minnesotan Travelers**
+
+Local Minnesotans who work outside and return during the holidays can be enticed to book two way travels with SunCountry by introducing loyalty benefits customized for solo travelers or prefessionals, like check-in benefits, class upgrades and minnesota themed accessories.
+
+
