@@ -1,0 +1,1118 @@
+---
+title: 'EDA HW3 - Central Park Coffee Shop (Customer Analytics)'
+author: 'Group 6: Nitin Wahie, Aadarsh Gupta, Chia-Hsuan Chou, Patrick Hoban, Rekha
+  Mohandass, Kexin Liang'
+date: "11/1/2019"
+output:
+  pdf_document: 
+    df_print: paged
+    latex_engine: xelatex
+toc: true
+---
+
+# Business Problem
+## Situation
+Central Perk, a boutique coffee in New York City, has collected sales data, but has not explored the data set up to this point. They want to explore the transaction data to understand current customer buying patterns. The customers can be devided into 2 groups: members and non-members (guests), and Central Perk believes that they have a loyal membership base, and is looking forward to generating more revenue from it. Central Perk is currently operating with a 20% gross margin.
+
+## Complication
+Management at Central Perk haven't explore the data, so they have little knowledge about real customer behaviours and items demand. However, they hold the belif that they currently don't need additional customers for their business. Therefore, they need to leverage the current transction data to help them to capture the customer purchase patterns and value of membership to generate revenue from in the future.
+
+
+## Key Question
+
+Are customers at Central Perk really loyal and give sufficient support to the business?
+
+* Is the current customer base is fairly loyal year over year?
+
+* If not, how can we increase the loyalty?
+    
+What marketing strategies/ campaigns Central Perk and implement to drive sales in the near future?
+
+* What discount/price adjustment to offer?
+
+* What extra services to offer?
+
+# Our Approach
+In our analysis, we first explored that data from both membership and item perspective to understand the general purchase pattern. Then, we dived deeper in these 2 directions. For the member, we used RFM analysis to evaluate their value. For items, we ran market basket analysis to understand how items are purchased together across times.
+
+# Data Preparation
+
+## Data Overview
+### Data structure
+We have 26 months worth of transactions, starting from July 2016 up until August 2018. The transactions include various categories of products, including Coffee, Tea, Beer, Food items as well as extras provided on these items. 
+
+#### Variable explanation
+
+* Date: date of the transaction
+
+* Time: time of the transaction
+
+* Category: category of the item, including coffee, beans, beers, cereal, and etc.
+
+* Item: specific item purchased in the transaction
+
+* Qty: number of item purchased in the transaction
+
+* Price.Point.Name: size or price point of the item purchased
+
+* Gross.Sales: gross sales price
+
+* Discounts: discount for that transacion
+
+* Net.Sales: net price paid for the item purchased
+
+* Tax: tax attached to the trasaction
+
+* Notes: notes about the transaction
+
+* Event.Type: whether the transaction is a payment or refund
+
+* Customer.ID: if there's ID, we assume it's a member, or else it's a guest
+
+
+## Data Cleaning and Transformation
+Data set was fairly clean from the start. Although, we did find a few issues that needed attending. Our first assumption is around customer ID. We assume that those transactions with a customer id included are members with some form of membership identification and all others with NA in that column are converted to guest. 
+
+We assume those with a status of NA are not regular customers who would be part of a membership rewards program. Where there was no customer ID available we used time of order to define the transaction. 
+
+Data was contained in three separate excel files. Each file represented a separate year of data. File titles for 2016 and 2018 data sets were inaccurate in that the files actually contianed data for different years, but this became trivial after we imported the three separate files.
+
+```{r, warning=FALSE, results='hide', message=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(lubridate)
+library(arules)
+library(arulesViz)
+library(RColorBrewer)
+```
+
+Firstly We combine all the data and sort them by date and time for easy analysis. 
+```{r, eval=FALSE}
+data16 <- read.csv(file="Central Perk Item Sales Summary 2017.csv", 
+header=TRUE, sep=",")
+data17 <- read.csv(file="Central Perk Item Sales Summary 2016.csv", 
+header=TRUE, sep=",")
+data18 <- read.csv(file="Central Perk Item Sales Summary 2018.csv", 
+header=TRUE, sep=",")
+
+data16 <- data16[order(data16$Date, data16$Time),]
+data17 <- data17[order(data17$Date, data17$Time),]
+data18 <- data18[order(data18$Date, data18$Time),]
+data <- rbind(data16,data17,data18)
+```
+
+Based on our assumption that all instances of the data that has NA in its customer.ID field is a guest customer, a membership field was added to capture this information. 
+
+```{r, eval=FALSE}
+data <- data %>% mutate(membership = ifelse(is.na(Customer.ID), 
+"guest", "member"))
+
+```
+
+In order to isolate separate transactions, especially for non-members who cannot be identified using any information provided in the data, we assume that all transactions made at the exact same date and time belongs to the same customer. To achieve this, the date and timestamp fields were combined, and this value was used to assign a unique 'order' id for each transaction. 
+
+```{r, eval=FALSE}
+#Combining date and time to create trans_id column
+data1 <- unite(data, trans_id, c(Date, Time), remove = FALSE)
+
+#Creating variable to assign a transaction number for each transaction
+data1$order <- rank(data1$trans_id, ties.method = "min")
+```
+
+In order to make our analysis more intuitive and provide better clarity to the results of association rules (that would be implemented later), we also combined the category and item fields.
+
+```{r, eval=FALSE}
+data1[data1$Item == 'Alm Rasp',]$Item = 'Almond Rasp'
+data1$Item = as.character(data1$Item)
+data1$Item = as.factor(data1$Item)
+data1 <- unite(data1, cust_item, c(Category, Item), remove = FALSE)
+```
+
+As a part of data preparation for implementing association rules to identify the most popular combination of items purchased, we also arranged items per transaction in a different dataframe.
+
+```{r, eval=FALSE}
+data1 <- data1 %>% group_by(order) %>% mutate(item_id = row_number())
+df1 <- data1 %>% select(Date, Time, order, item_id, cust_item) %>% 
+spread(item_id, cust_item)
+```
+
+Furthermore, all data was initially in string format. Before starting our analysis, we also converted all such fields into numberic, data or timestamp types accordingly
+
+```{r,eval=FALSE}
+data1$Gross.Sales <- as.numeric(str_replace(str_replace(str_replace(data1$Gross.Sales,
+'[$]', ''), '[(]', '-'),'[)]', ''))
+data1$Discounts <- as.numeric(str_replace(str_replace(str_replace(data1$Discounts,
+'[$]', ''), '[(]', '-'),'[)]', ''))
+data1$Net.Sales <- as.numeric(str_replace(str_replace(str_replace(data1$Net.Sales,
+'[$]', ''), '[(]', '-'),'[)]', ''))
+data1$Tax <- as.numeric(str_replace(str_replace(str_replace(data1$Tax,
+'[$]', ''), '[(]', '-'),'[)]', ''))
+
+# Cleaning date to date type
+data1$Date <-as.Date(gsub("/", "-", gsub('\"', '',data1$Date)), 
+"%m-%d-%y")
+
+# Converting time to timestamp
+library(chron)
+data1$Time <- chron(times = gsub('\"', '',data1$Time))
+
+#Assigning an item number for each item in an invoice
+data1 <- data1 %>% group_by(order) %>% mutate(item_id = row_number())
+data1 <- data1 %>% group_by(order) %>% mutate(Gross_Sales_Total = sum(Gross.Sales),
+                                              Discounts_Total = sum(Discounts),
+                                              Net_Sales = sum(Net.Sales),
+                                              Total_Tax = sum(Tax))
+```
+
+
+# Analysis
+## 1. Overall Purchase Pattern
+### Transactions by Month
+
+```{r, eval=FALSE}
+data1_by_month <- data1 %>% group_by(month = floor_date(Date, "month")) %>%
+  summarise(gross = sum(Gross_Sales_Total), trans = n())
+data1_by_month <-data1_by_month %>% 
+mutate(amount_per_trans = gross / trans)
+data1 <- data1 %>% arrange(Date,Time)
+```
+```{r,echo=FALSE}
+data1_by_month = read.csv('data1_by_month.csv')
+data1_by_month_hour = read.csv('data1_by_month_hour.csv')
+all_cat_hr_mon = read.csv('all_cat_hr_mon.csv')
+df_RFM = read.csv('df_RFM.csv')
+data1 = read.csv('data1.csv')
+```
+```{r, warning=FALSE, message=FALSE}
+ggplot(data1_by_month, aes(month, trans)) + 
+  geom_bar(stat= 'identity', color = 'white', fill = 'gold') +
+  theme_classic() + 
+  ylab("Number of transactions") +
+  labs(title = "Total Transactions over time (2016 - 2018)")
+
+```
+
+
+**Interpretation:** Looking at the plot above, we see that more people turn up to Central Perks towards the end of spring / start of the summer. The user turn up dies down close in the winter months.  
+
+Location of the coffee shop, in general, could be playing  a part in terms of the footfall.
+Another potential determiner for the difference in transactions could be the menu offered in those months. 
+
+To get an idea about the menu offered, we looked at the Categories of product that are most transacted at Central Perk. 
+
+
+```{r, eval=FALSE}
+data_temp <- filter(data2, order != 221561)
+all_cat_hr_mon <- data_temp %>% 
+mutate(price = Gross.Sales/Qty) %>% 
+  group_by(month = floor_date(Date, "month"), 
+  hour = hours(Time), Category) %>%
+  summarise(trans = n(), 
+  gross_amt = sum(Gross.Sales), 
+  avg_amt = mean(price))
+```
+
+The plot below is normalized by transactions for each month to get a view of different products offered rather than exact amount of transactions. Comparison on transactions can still be made based on the size of individual color bars across months.
+
+```{r}
+## Items purchased by month (normalized to show the categories offered)
+ggplot(all_cat_hr_mon, aes(factor(month), trans, fill = Category))+ 
+  geom_bar(stat = 'identity', position = 'fill' ) + ylab('') + 
+  theme_classic() + xlab('') + 
+  labs(title = 'Product Categories transacted by month') + 
+  theme(axis.ticks.y = element_blank(), axis.text.y = element_blank(), 
+  axis.line.y = element_blank()) + 
+  theme(axis.text.x = element_text(angle = 90)) 
+```
+
+**Interpretation:** The above plot for product categories shows that there is usually no change in the categories transacted across months or the time of year. We do however, see some Cereal transactions in only few of the months but that number is too small to impact the overall analysis
+
+
+
+**Average Categorical Sales by Month**
+
+```{r fig.width=20, fig.height=15,echo=FALSE}
+library(png)
+library(grid)
+img <- readPNG("/Users/kexinliang/Desktop/MSBA6410-EDAV/HW 3/Central Perk/avg categorical sales by month.png")
+grid.raster(img)
+```
+
+**Interpretation:** From the above graph, we can see that for coffee, bean, food and tea, the average sales are constant across months, meaning that there's little price varation. However, for beers, extra and non-coffee, the variation is larger, singaling Central Perks are offering promotion campaign for beers in several months. For extra, customers are ordering extra ice more during summer, which is only $0.5 per serving and therefore lower the average net sales. Non-coffee, on the other hand, has higher sales for during winter for the higher price hot chocolate.
+
+Demand for different items may also differ by different by time of the day, so we decide to look into it.
+
+
+### Transactions by Hours of Day
+```{r,eval=FALSE}
+##Grouping by hours
+
+data1_by_month_hour <- data1 %>% 
+  group_by(month = floor_date(Date, "month"), hour = hours(Time)) %>%
+  summarise(gross = sum(Gross_Sales_Total), trans = n()) %>%
+  mutate(avg_per_trans = gross / trans)
+```
+```{r,warning=FALSE, message=FALSE}
+ggplot(data1_by_month_hour, aes(hour, avg_per_trans)) + 
+  geom_bar(stat = 'identity', fill = 'gold') + theme_classic() + 
+  labs(title = 'Average amount ($) transacted by hour of day') + 
+  ylab("") + xlab('Hour of day') + 
+  scale_x_continuous(breaks = seq(6,20))
+
+```
+
+**Interpretation:**
+Looking at the average amount transacted by hour of the day tells us that it is fairly constant throughout the day, starting string at 7 AM in the morning and declining marginally till 7 PM. The reading at 7 PM tells us a different story : the hour records highest value of transactions during the day  
+
+
+
+**When we look at the number of transactions by hour of the day, we see a different pattern :** 
+```{r,warning=FALSE}
+## Average transactions per hour 
+ggplot(data1_by_month_hour, aes(hour, trans)) + 
+  geom_bar(stat = 'identity', fill = 'gold') +
+  theme_classic()+ 
+  labs(title = 'Average number of transactions by hour of day') + 
+  ylab("") + xlab('Hour of day') + 
+  scale_x_continuous(breaks = seq(6,20))
+```
+
+**Interpretation:**
+We see most transactions earlier in the day (till noon), after which the number drops down till the end of day. Also, 7 PM in the evening sees extremely low orders, which (based on the average amount plot above) means that transaction value increases towards evening and is the highest at 7PM.
+
+
+
+**Total Categorical Net Sales by Hour of Day**
+
+```{r fig.width=20, fig.height=15,echo=FALSE}
+library(png)
+library(grid)
+img <- readPNG("/Users/kexinliang/Desktop/MSBA6410-EDAV/HW 3/Central Perk/Categorial Sales by Hours.png")
+grid.raster(img)
+```
+
+**Interpretation:**
+Looking at the total sales by different categories, we can find that coffee, extra and food follow the same pattern, people purchase coffee with food on their way to work and after lunch break. On the other hand, non-coffee and tea peak in the afternoon, and people only buy cereal in the morning. Beer, lastly, performs very different than other products, people usually buy it during evening.    
+  
+  
+
+
+## 2. Membership at Central Perk
+
+We tried to validate the belief of the owners at Central Perk regarding membership. As our first step, we compared the sales produced by the members against the sales contributed by the non-members.
+
+```{r}
+data1$Year <- year(as.Date(data1$Date))
+members_data <- data1 %>%
+  group_by(membership, Year) %>%
+  summarize(sales = sum(Net.Sales))
+
+################### GRAPH GUEST VS MEMBER SALES YEAR OVER YEAR 
+
+ggplot(data = members_data, 
+mapping = aes(x = Year, y = sales, fill = membership)) +
+  geom_bar(position = 'dodge', stat = "identity", na.rm=TRUE) + 
+  theme_classic() + ggtitle('Member vs Guest: Sales $ per Year') + 
+  scale_fill_manual(values = c("gold", "dark red")) + 
+  labs(y="Total Sales $", x="Year")
+
+```
+
+**Interpretation:**The plots show that the members are more frequent than non-members and that the members bring in more revenue than guests.
+
+Diving a bit deeper, we analyzed the rate at which Central Perk acquired members. Plots illuminating the accretion and attrition of customers by month of year showed that Central Perk lost most of the members that it aquired, within the same month.
+
+
+
+**Customer accretion plot:**
+```{r,warning=FALSE, message=FALSE}
+###################  New members per month ######################
+data1$Day <- weekdays(as.Date(data1$Date))
+
+members_dayofwk_data <- data1 %>%
+  group_by(membership, Year, Day) %>%
+  summarize(sales = sum(Net.Sales))
+  
+members_dayofwk_data <- members_dayofwk_data[complete.cases(members_dayofwk_data), ]
+
+data1$Month <- month(as.Date(data1$Date))
+
+new_members <- data1 %>%
+  mutate(Date = as.Date(Date)) %>%
+  group_by(Customer.ID) %>%
+  filter(Date == min(Date)) %>%
+  slice(1)
+  
+new_members_month <- new_members %>%
+  group_by(Year, Month) %>%
+  count(membership)
+```
+```{r}
+ggplot(data = new_members_month, mapping = aes(x = Month, 
+y = n, fill = factor(Year))) +
+  geom_bar(position = 'dodge', stat = "identity", na.rm=TRUE) + 
+  theme_classic() + ggtitle('New Members per Month') + 
+  scale_fill_manual(values = c("gold", "dark red", "beige")) + 
+  labs(y="New Members", x="Month") + 
+  scale_x_continuous(breaks = c(1,2,3,4,5,6,7,8,9,10,11,12))
+
+```
+
+
+
+**Customer attrition plot:**
+```{r,warning=FALSE, message=FALSE}
+old_members <- data1 %>%
+  mutate(Date = as.Date(Date)) %>%
+  group_by(Customer.ID) %>%
+  filter(Date == max(Date)) %>%
+  slice(1)
+
+members_leaving_per_month <- old_members %>%
+  group_by(Year, Month) %>%
+  filter(Date <= as.Date('2018-03-31'), 
+  Date >= as.Date('2016-09-01')) %>%
+  count(membership)
+```
+```{r}
+ggplot(data = members_leaving_per_month, 
+mapping = aes(x = Month, y = n, fill = factor(Year))) +
+  geom_bar(position = 'dodge', stat = "identity", na.rm=TRUE) + 
+  theme_classic() + ggtitle('Members Leaving per Month') + 
+  scale_fill_manual(values = c("gold", "dark red", "beige")) + 
+  labs(y="Members Lost", x="Month") + 
+  scale_x_continuous(breaks = c(1,2,3,4,5,6,7,8,9,10,11,12))
+
+```
+
+
+This anomalous trend insinuates that members may not be as loyal to the shop as claimed by the owner. On further analyzing the total number of days during which the members have actively transacted with the shop, we see that out of 31,822 unique members, 24,736 customers have purchased just once from the shop. Tying this back to the initial plot that attributes larger amount of sales to members, it is clear that the initial analysis is misleading and that most of the sales attributed to "members" are these one-time customers.
+
+While the actual reasons for the exorbitant number of membership sign-up is unknown, it is fair to assume that customers are leveraging one-time offers provided by the coffee shop in exchange for becoming members. The following graphs prove that Central Perk does not differentiate among its customers to provide discounts.
+
+```{r fig.width=2, fig.height=4,echo=FALSE}
+library(png)
+library(grid)
+img <- readPNG("/Users/kexinliang/Desktop/MSBA6410-EDAV/HW 3/Central Perk/discount_count.png")
+grid.raster(img)
+```
+
+
+```{r fig.width=2, fig.height=4,echo=FALSE}
+library(png)
+library(grid)
+img <- readPNG("/Users/kexinliang/Desktop/MSBA6410-EDAV/HW 3/Central Perk/discount_sum.png")
+grid.raster(img)
+```
+
+
+Although more instances of discounts were provided to members, the total value of discounts provided to guests exceeds that given to members, thereby negating the need for customers to maintain their membership with Central Perk. In order to build a loyal customer base, Central perk must provide incentives to its members for prolonged interaction with the business, rather than for a single-time sign-up.
+
+Before suggesting any actions to improve customer loyalty, it is imperative to understand the value of Central Perk's current customer base elaborately. For this we evaluate customers using the RFM method to calculate their value.
+
+
+## 3. Within members, is there any difference?
+
+We used RFM model to analyze customer value. It consists of three metrics :
+
+1. Recency – How recently did the customer purchase?
+
+2. Frequency – How often do they purchase?
+
+3. Monetary Value – How much do they spend?
+
+As we have Customer IDs only for our members; therefore, we have removed the rows for non members as we have no way to identify them.
+
+**Let's prepare the data and calculate the RFM score.**
+```{r,warning=FALSE, message=FALSE,eval=FALSE}
+# With Extras
+df_1 <- data1 %>% select(Date, Time, order, item_id, cust_item,
+                        Gross_Sales_Total,Discounts_Total,Net_Sales,Total_Tax,Notes,
+                        Event.Type,membership,Customer.ID) %>% spread(item_id, cust_item)
+# Filtering out members
+df3 = subset(df_1, membership=='member')
+df3 = df3 %>% select(Date, Net_Sales, 
+Customer.ID,order)
+
+# Calculating RFM
+df3$Customer.ID = as.character(df3$Customer.ID)
+df_RFM <- df3 %>% 
+  group_by(Customer.ID) %>% 
+  summarise(recency=
+  as.numeric(as.Date("2018-08-24")-max(Date)),
+            frequency=n_distinct(order), 
+            monetary= sum(Net_Sales)/n_distinct(order)) %>%
+  ungroup()
+
+# Treating outliers as freq is less and creating bias in monetory rank
+
+df_RFM$monetary = ifelse(df_RFM$monetary>=12,12,df_RFM$monetary)
+
+# Creating Ranks 
+df_RFM$rank_R = cut(-df_RFM$recency,5, labels=F)
+df_RFM$rank_F = cut(df_RFM$frequency,5,labels=F)
+df_RFM$rank_M = cut(df_RFM$monetary,5,labels=F)
+
+```
+
+Lets analyze customer patterns based on how recent their last order is by looking at the rank based out of RFM methodology (higher the rank the better it is).
+
+**Recency Analysis**
+```{r,warning=FALSE, message=FALSE}
+# For Recency
+m1 = df_RFM %>% group_by(rank_R) %>% summarize(n = n())
+ggplot(m1, aes(x = rank_R, y = n)) + 
+  geom_bar(stat='identity',fill="#004885") +
+  labs(y="Number of Customers", x = "Recency_Rank") + 
+  theme_classic() +
+  geom_text(aes(label=n), 
+  vjust=1.6, color="white", size=3.5)
+
+m1 = df_RFM %>% group_by(rank_R) %>% 
+summarize(m_r = round(mean(recency)))
+
+ggplot(m1, aes(x = rank_R, y = m_r)) + 
+geom_bar(stat='identity',fill="#004885")+
+  labs(y="Mean Days from Last Purchase", 
+  x = "Recency_Rank") + 
+  theme_classic() +
+  geom_text(aes(label=m_r), vjust=1.6, 
+  color="white", size=3.5)
+```
+
+**Interpretation:**As seen even the rank 5 customers have mean days of last purchase of about 72 days which indicates that most of the members are not that frequent to the coffee shop and only a small proportion visits the store frequently.
+
+
+**Let's see how frequent the customers are to our cafe.**
+```{r,warning=FALSE, message=FALSE}
+# For Frequency
+m1 = df_RFM %>% group_by(rank_F) %>% 
+summarize(n = n())
+ggplot(m1, aes(x = rank_F, y = n)) + 
+geom_bar(stat='identity',fill="#004885") +
+  labs(y="Number of Customers", 
+  x = "Frequency_Rank") + theme_classic() +
+  geom_text(aes(label=n), 
+  vjust=.01,color="black", size=3.5)
+
+m2 = df_RFM %>% group_by(rank_F) %>% 
+summarize(m_f=round(mean(frequency)))
+ggplot(m2, aes(x = rank_F, y = m_f)) + 
+geom_bar(stat='identity',fill="#004885") +
+  labs(y="Mean Frequency", x = "Frequency_Rank") + 
+  theme_classic() +
+  geom_text(aes(label=m_f), vjust=1.6,
+  color="white", size=3.5)
+```
+
+**Interpretation:**Most of customers are ranked as 1 based on frequency which indicates customers often not come back to the store for repurchase. Although, people with highest rank have a frequency of 386 which incdicate even the most frequent customers visits the store 15 days per month.
+
+
+
+**Let's see the buying pattern of the cafe's customers.**
+```{r,warning=FALSE, message=FALSE}
+m1 = df_RFM %>% group_by(rank_M) %>% summarize(n = n())
+ggplot(m1, aes(x = rank_M, y = n)) + 
+geom_bar(stat='identity',fill="#004885")+
+  labs(y="Number of Customers", x = "Monetary_Rank") + 
+  theme_classic() +
+  geom_text(aes(label=n), vjust=1.6,
+  color="white", size=3.5)
+
+m3 = df_RFM %>% group_by(rank_M) %>% 
+summarize(m_m = round(mean(monetary)))
+ggplot(m3, aes(x = rank_M, y = m_m)) + 
+geom_bar(stat='identity',fill="#004885")+
+  labs(y="Mean Amount Spend", x = "Monetary_Rank") + 
+  theme_classic() +
+  geom_text(aes(label=m_m), vjust=1.6,
+  color="white", size=3.5)
+```
+
+**Interpretation:**Most of our customers are ranked lower in terms of amount spend.Also even the highly ranked customers spend just 11 dollars per transaction. We need to build strategy to make people buy more items by custom bundling and other strategies discussed further down.
+
+
+
+**We further used the RFM metrics to cluster our customers on categaries discussed below:**
+
+1. Loyalist (R>=3, F>=4, M>=4) : Bought recently, buy often and spend the most.
+
+2. Potential Loyalist (R>=3, F<=3, M<=4) : Recent customers, spent good amount, bought more than once.
+
+3. New Customers (R>=4, F<=1, M<=3) : Bought more recently, but not often.
+
+4. Promising Recent Shoppers (R [3,5], F<=1, M<=1) : Recent shoppers, but haven't spent much
+
+5. Need Attention (R [2,3], F[2,3], M[2,3]) : Average recency, frequency & monetary values but with more attention can become loyals.
+
+6. About to Sleep (R <=2, F<=2, M<=2) : Below average recency, frequency & monetary values.
+
+7. At Risk (R <=2, F [2,5], M [2,5]) : Spent big money, purchased often but long time ago.
+
+8. Lost (R=1, F=1, M=1) : Lost	Lowest recency, frequency & monetary scores.
+
+9. Infrequent High Spender (R=1, F=1, M >=4) : High purchase but low frequency and low recent purchases.
+
+10. New High Spender (R>=3, F=1, M>=5) : High spend, recently purchased a lot, high purchase amount.
+
+
+```{r,warning=FALSE, message=FALSE}
+# Segmenting Customers
+df_RFM$Segment = "NA"
+df_RFM[(df_RFM$rank_R>=3) & 
+(df_RFM$rank_F>=4) & 
+(df_RFM$rank_M>=1),]['Segment'] = "Loyalist"
+
+df_RFM[(df_RFM$rank_R>=3) & (df_RFM$rank_F<=3)
+& (df_RFM$rank_M<=4),]['Segment'] = "Potential Loyalist"
+
+df_RFM[(df_RFM$rank_R>=4) & 
+(df_RFM$rank_F<=1) & 
+(df_RFM$rank_M<=3),]['Segment'] = "New Customers"
+
+df_RFM[(df_RFM$rank_R>=3 & df_RFM$rank_R<=5) 
+& (df_RFM$rank_F<=1) & 
+(df_RFM$rank_M<=1),]['Segment'] = "Promising	Recent shoppers"
+
+df_RFM[(df_RFM$rank_R>=2 & 
+df_RFM$rank_R<=3) & (df_RFM$rank_F>=2 & df_RFM$rank_F<=3) & 
+(df_RFM$rank_M>=2 & df_RFM$rank_M<=3),]['Segment'] = "Need Attention"
+df_RFM[(df_RFM$rank_R>=2 & df_RFM$rank_R<=3) 
+& (df_RFM$rank_F<=2) & 
+(df_RFM$rank_M<=2),]['Segment'] = "About To Sleep"
+
+df_RFM[(df_RFM$rank_R<=2) & 
+(df_RFM$rank_F>=2 & df_RFM$rank_F<=5) 
+& (df_RFM$rank_M>=2 & 
+df_RFM$rank_M<=5),]['Segment'] = "At Risk"
+
+df_RFM[(df_RFM$rank_R>1 & 
+df_RFM$rank_R<=2) & 
+(df_RFM$rank_F>1 & df_RFM$rank_F<=2)
+& (df_RFM$rank_M>=1 
+& df_RFM$rank_M<=5),]['Segment'] = "Hibernating"
+
+df_RFM[(df_RFM$rank_R<=2) & 
+(df_RFM$rank_F<=2) &
+( df_RFM$rank_M<=5),]['Segment'] = "Lost"
+
+df_RFM[(df_RFM$rank_R<=1) & 
+(df_RFM$rank_F<=1) & 
+(df_RFM$rank_M>=4),]['Segment'] = "Infrequent High Spender"
+
+df_RFM[(df_RFM$rank_R>=3) & 
+(df_RFM$rank_F<=1) & 
+(df_RFM$rank_M>=5),]['Segment'] = "New High Spender"
+
+# Grouping By Identified Segments
+segments = df_RFM %>%
+  count(Segment) %>%
+  arrange(desc(n)) %>%
+  rename(Segment = Segment, Count = n)
+```
+```{r,warning=FALSE, message=FALSE}
+ggplot(segments, 
+aes(reorder(Segment,-Count), Count)) + 
+geom_bar(stat='identity',fill="#004885") +
+  labs(y="Number of Customers", x = "Segments") + 
+  theme_classic()+
+  theme(axis.text.x = 
+  element_text(angle = 45, hjust = 1)) + 
+  geom_text(aes(label=Count), 
+  vjust=0.001, color="black", size=3.5)
+```
+
+**Interpretation:**We notice few loyal customers as opposed the belief of cafe. Most common categary is the lost customers followed by New ones. Potential loyalist and Promising New Shoppers are the categaries we should focus our attention on and try to convert them to loyals.
+
+
+
+**Lets' look at the metrics per segment to understand the characters of our customers.**
+```{r,warning=FALSE, message=FALSE}
+# Recency Overview
+  rec = df_RFM %>%  group_by(Segment) %>%  
+  summarize(avg.purchase = 
+  round(mean(recency)))
+  ggplot(rec, 
+  aes(reorder(Segment,-avg.purchase), avg.purchase)) + 
+  geom_bar(stat='identity',fill="#004885") +
+    labs(y="Mean Recent Purchase Days Lag",
+    x = "Segments") + 
+    theme_classic()+
+    theme(axis.text.x = 
+    element_text(angle = 55, hjust = 1)) + 
+    geom_text(aes(label=avg.purchase), vjust=0.001, 
+    color="black", size=3.5)
+  
+  # Frequency Overview
+  rec = df_RFM %>%  group_by(Segment) %>%  
+  summarize(avg.Freq = round(mean(frequency)))
+  ggplot(rec, aes(reorder(Segment,-avg.Freq), avg.Freq)) + 
+  geom_bar(stat='identity',fill="#004885") +
+    labs(y="Mean Freq.", x = "Segments") + theme_classic()+
+    theme(axis.text.x = element_text(angle = 55, hjust = 1))+ 
+    geom_text(aes(label=avg.Freq), vjust=0.001, color="black", 
+    size=3.5)
+  
+  # Monetory Overview
+  rec = df_RFM %>%  group_by(Segment) %>% 
+  summarize(avg.Amt = round(mean(monetary)))
+  ggplot(rec, aes(reorder(Segment,-avg.Amt), avg.Amt)) + 
+  geom_bar(stat='identity',fill="#004885") +
+    labs(y="Mean Amount/Purchase.", x = "Segments") + 
+    theme_classic() +
+    theme(axis.text.x = 
+    element_text(angle = 55, hjust = 1))+ 
+    geom_text(aes(label=avg.Amt), 
+    vjust=0.001, color="black", size=3.5)
+```
+
+**Interpretation:**As can be observed most of our customer segments have made their purchase long back and have very low frequency; we need to strategize to make them come again to our cafe. Also, our most frequent customer group spends very less on an average compared to non frequent customers. Therefore, need to strategize to make them buy more.
+
+
+
+## 4. Item wise analysis - Market Basket Analysis
+### Items frequent purchased together
+To get an overview of items purchased together frequently, we only keep the columns of items in the transaction-level data to perform market basket analysis.
+
+Initially, we performed a generic market basket analysis on the transaction level data.
+
+
+```{r,eval=FALSE}
+whole_items = df2 %>% select(item_1:item_15)
+write.csv(whole_items, 'only_item.csv', row.names = FALSE)
+```
+```{r,warning=FALSE, message=FALSE,results='hide'}
+item_trans0 = read.transactions("only_item.csv", 
+    format = "basket", sep = ",", rm.duplicates = TRUE, header = TRUE)
+#inspect(item_trans0[1:10])
+rules0 <- apriori(item_trans0, 
+    parameter = list(supp = 0.001, conf = 0.001))
+rules0_lift = sort(rules0,by='lift',decreasing = TRUE)
+```
+```{r,warning=FALSE, message=FALSE}
+inspect(rules0_lift[1:10])
+plot(rules0_lift[1:10], method = 'paracoord')
+```
+
+**Interpretation:**The result shows the most frequently purchased combination of items.As shown in the plot, customers who buy Perrier tend to buy Espresso also, and those who buy Financier are likely to buy Cortado together. The combination of these 2 items show high lift which means that their purchases are highly correlated. When we look into the item combinations having high frequencies of occurence, we can see that croissants and small-sized tea are mostly purchased together.
+
+### Do these combinations change over time? (hours of day/ seasonality/ special product)
+
+In this section, we identify customer's item preferences over 4 different quarters. Based on the formula of lift, the lift won't change when we exchange the position of left hand side and right hand side. Either way it summarises the strength of association between the products on the left and right hand side of the rule. So we put the time-related variable into the position of RHS to better analyze the results of association rules and make interpretation.
+
+#### Quarterly Analysis
+First, we added the quarter column into the previous transaction-level item data to see if there are some particular single item and combination of items which have correlation with a particular quarter.
+
+```{r,eval=FALSE}
+items = df2 %>% select(item_1:quarter)
+summary(items)
+for (i in 1:4){
+  items[items$quarter == i,]$quarter = paste('Q',i,sep = '')
+}
+
+items$quarter = as.factor(items$quarter)
+str(items)
+write.csv(items,'items_trans_quarter.csv',row.names = FALSE)
+```
+
+**For quarter 1:**
+```{r,warning=FALSE, message=FALSE,results='hide'}
+item_trans1 = read.transactions("items_trans_quarter.csv", 
+    format = "basket", sep = ",", rm.duplicates = TRUE, header = TRUE)
+# Q1
+rules1 <- apriori(item_trans1, parameter = list(supp = 0.001, 
+    conf = 0.25), appearance = list(rhs = 'Q1'))
+rules1_lift = sort(rules1,by='lift',decreasing = TRUE)
+```
+```{r,warning=FALSE, message=FALSE}
+inspect(rules1_lift[1:10])
+plot(rules1_lift[1:10], method = 'paracoord')
+```
+
+**Interpretation:**Hot chocolate, Chai Tea, and Hairbender Beans are most frequently purchased in quarter 1. For combination of items, Drip with donut, croissant with tea, and cortado with donut are most related. And large size drip sells most when we set a threshold of lift larger than 1.2.
+
+
+**For quarter 2 particularly:**
+```{r,warning=FALSE, message=FALSE,results='hide'}
+# Q2
+rules2 <- apriori(item_trans1, parameter = list(supp = 0.001, 
+    conf = 0.25), appearance = list(rhs = 'Q2'))
+rules2_lift = sort(rules2,by='lift',decreasing = TRUE)
+```
+```{r,warning=FALSE, message=FALSE}
+inspect(rules2_lift[1:10])
+plot(rules2_lift[1:10], method = 'paracoord')
+```
+
+**Interpretation:**For single items, Stubby coffee is most related to quarter 2. For combination of items, Drip with Tea (both small size), Drip with Financier, and Americano with Drip are most related.
+
+
+**For quarter 3 particularly:**
+```{r,warning=FALSE, message=FALSE,results='hide'}
+# Q3
+rules3 <- apriori(item_trans1, parameter = list(supp = 0.001, 
+    conf = 0.25), appearance = list(rhs = 'Q3'))
+rules3_lift = sort(rules3,by='lift',decreasing = TRUE)
+```
+```{r,warning=FALSE, message=FALSE}
+inspect(rules3_lift[1:10])
+plot(rules3_lift[1:10], method = 'paracoord')
+```
+
+**Interpretation:**For single item, Lemonade and Stubby are most related to quarter 3, moreover, Lemonade has a very high lift with quarter 3, which means its sales have strong connection with seasonality. For combination of items, Drip with Croissant, Lenka Bar, and Financier respectively are most related. And small size Drip sells most when we set a thredshold of lift larger than 1.18.
+
+
+**For quarter 4 particularly:**
+```{r,warning=FALSE, message=FALSE,results='hide'}
+rules4 <- apriori(item_trans1, parameter = list(supp = 0.001, 
+    conf = 0.25), appearance = list(rhs = 'Q4'))
+rules4_lift = sort(rules4,by='lift',decreasing = TRUE)
+```
+```{r,warning=FALSE, message=FALSE}
+inspect(rules4_lift)
+plot(rules4_lift[1:10], method = 'paracoord')
+```
+
+**Interpretation:** For single item, Hot chocolate, Au Lait, and Tea are most related to quarter 4; for combination of items, drip with donut is most related. And large size drip sells most when we set a threshold of lift larger than 1.18.
+
+
+
+#### Hourly Analysis
+```{r,eval=FALSE}
+items_hour = df2 %>% select(item_1:item_15,hour)
+summary(items_hour)
+items_hour = items_hour[!is.na(items_hour$hour),]
+items_hour$hour_range = NA
+items_hour[(items_hour$hour >= 6) &
+    (items_hour$hour < 11),]$hour_range = '6AM - 11AM'
+items_hour[(items_hour$hour >= 11) &
+    (items_hour$hour < 14),]$hour_range = '11AM - 2PM'
+items_hour[(items_hour$hour >= 14) &
+    (items_hour$hour < 18),]$hour_range = '2PM - 6PM'
+items_hour[(items_hour$hour >= 18) &
+    (items_hour$hour < 21),]$hour_range = '6PM - 9PM'
+items_hour = items_hour %>% select(-hour)
+items_hour$hour_range = as.factor(items_hour$hour_range)
+write.csv(items_hour[,-1],
+    'items_hour_trans.csv',row.names = FALSE)
+```
+
+
+**For 6AM - 11AM (Morning):**
+```{r,warning=FALSE, message=FALSE,results='hide'}
+##Arules
+item_trans2 = read.transactions("items_hour_trans.csv",
+    format = "basket", sep = ",", rm.duplicates = TRUE, header = TRUE)
+#inspect(item_trans2[1:10])
+# 6am-11am
+rules_morning <- apriori(item_trans2, parameter = list(supp = 0.001, 
+    conf = 0.01, minlen = 2), appearance = list(rhs = '6AM - 11AM'))
+rules_morning_lift = sort(rules_morning,by='lift',decreasing = TRUE)
+```
+```{r,warning=FALSE, message=FALSE}
+inspect(rules_morning_lift[1:10])
+plot(rules_morning_lift[1:10], method = 'paracoord')
+```
+
+**Interpretation:**Overall, sales of croissant has a strong relation with morning time period. It also has a high lift when it is combined with cappucino and drip in the morning.
+
+
+**For 11AM - 2PM (Noon):**
+```{r,warning=FALSE, message=FALSE,results='hide'}
+# 11am - 2pm
+rules_noon <- apriori(item_trans2, parameter = list(supp = 0.003, 
+    conf = 0.01, minlen = 2), appearance = list(rhs = '11AM - 2PM'))
+rules_noon_lift = sort(rules_noon,by='lift',decreasing = TRUE)
+```
+```{r,warning=FALSE, message=FALSE}
+inspect(rules_noon_lift)
+plot(rules_noon_lift, method = 'paracoord')
+```
+
+**Interpretation:**Americano, Latte and donut are most related to the noon time period. There is no particular combination of items during this time.
+
+
+**For 2PM - 6PM (Afternoon):**
+```{r,warning=FALSE, message=FALSE,results='hide'}
+# 2pm - 6pm
+rules_afternoon <- apriori(item_trans2, parameter = list(supp = 0.001, 
+    conf = 0.3, minlen = 2), appearance = list(rhs = '2PM - 6PM'))
+rules_afternoon_lift = sort(rules_afternoon,by='lift',decreasing = TRUE)
+```
+```{r,warning=FALSE, message=FALSE}
+inspect(rules_afternoon_lift[1:10])
+plot(rules_afternoon_lift[1:10], method = 'paracoord')
+```
+
+**Interpretation:**For single items sold, Hot chocolate, San Pellegrino, Mocha and tea are most related to the afternoon time period. For combination of items, latte with donut,is most related. And donut sells most when we set the thredshold of lift larger than 1.2.
+
+
+**For 6PM - 9PM (Evening):**
+```{r,warning=FALSE, message=FALSE,results='hide'}
+# 6pm - 9pm
+rules_night <- apriori(item_trans2, parameter = list(supp = 0.001, 
+conf = 0.001, minlen = 2), appearance = list(rhs = '6PM - 9PM'))
+rules_night_lift = sort(rules_night,by='lift',decreasing = TRUE)
+```
+```{r,warning=FALSE, message=FALSE}
+inspect(rules_night_lift)
+```
+
+**Interpretation:**There are no items that have a clear connection with night time sales since the lifts are all below 1.
+
+
+
+#### Weekly Analysis
+```{r,eval=FALSE}
+items_wkd = df2 %>% select(item_1:item_15,weekday)
+summary(items_wkd)
+items_wkd$weekday = as.factor(items_wkd$weekday)
+items_wkd$wkd = NA
+items_wkd[(items_wkd$weekday == 'Saturday') |
+    (items_wkd$weekday == 'Sunday'),]$wkd = 'Weekend'
+items_wkd[(items_wkd$weekday == 'Monday') |
+    (items_wkd$weekday == 'Tuesday') |
+            (items_wkd$weekday == 'Wednesday') |
+            (items_wkd$weekday == 'Thursday') |
+            (items_wkd$weekday == 'Friday'),]$wkd = 'Weekday'
+items_wkd$wkd = as.factor(items_wkd$wkd)
+summary(items_wkd)
+write.csv(items_wkd[,-16],
+    'items_only_weekday&weekend_trans.csv', row.names = FALSE)
+
+```
+
+
+**For Weekdays:**
+```{r,warning=FALSE, message=FALSE,results='hide'}
+# weekday
+item_trans4 = read.transactions("items_only_weekday&weekend_trans.csv", 
+    format = "basket",sep = ",", rm.duplicates = FALSE, header = TRUE)
+rules_weekday <- apriori(item_trans4, parameter = list(supp = 0.003, 
+    conf = 0.6, minlen = 2), appearance = list(rhs = 'Weekday'))
+rules_weekday_lift = sort(rules_weekday,by='lift',decreasing = TRUE)
+```
+```{r,warning=FALSE, message=FALSE}
+inspect(rules_weekday_lift[1:10])
+plot(rules_weekday_lift[1:5], method = 'paracoord')
+```
+
+**Interpretation:** In weekdays, people tend to buy drinks and food together. The sales of Cappucino with lenka bar, croissant with tea, and latte with lenka bar are strongly related to the weekdays.
+Also, Lenka bar sells most in weekdays when we set the thredshold of lift larger than 1.
+
+
+**For Weekends:**
+```{r,warning=FALSE, message=FALSE,results='hide'}
+rules_weekend <- apriori(item_trans4, parameter = list(supp = 0.003, 
+    conf = 0.4), appearance = list(rhs = 'Weekend'))
+rules_weekend_lift = sort(rules_weekend,by='lift',decreasing = TRUE)
+```
+```{r,warning=FALSE, message=FALSE}
+inspect(rules_weekend_lift)
+plot(rules_weekend_lift[1:10], method = 'paracoord')
+```
+
+**Interpretation:**In the weekends, people tend to buy more drinks together rather than foods. The sales of drips, drip with latte, and cappucino with latte are strongly related to the weekends.
+
+
+
+### Most Popular Combination of Items and Extras
+After we finish the market basket analysis based on different items, we then take a look into which extras are more frequently come with some particular items and how much are they related.
+First we did the data transformation to extract items with the corresponding extras.
+
+```{r,warning=FALSE, message=FALSE,eval=FALSE}
+############ for items with corresponding Extras ########
+#### take subsets of the data ####
+# data[50000, ]
+# data[50001,]
+subdata1 = data[1:50000,]
+for (i in 1:(nrow(subdata1)-1)) {
+  if ((subdata1[i,]$Category != 'Extras') &
+      (subdata1[i+1,]$Category == 'Extras')) {
+    subdata1[i,]$extra = subdata1[i+1,]$Item
+  }
+}
+# data[100000, ]
+# data[100001,]
+subdata2 = data[50001:100000,]
+for (i in 1:(nrow(subdata2)-1)) {
+  if ((subdata2[i,]$Category != 'Extras') &
+      (subdata2[i+1,]$Category == 'Extras')) {
+    subdata2[i,]$extra = subdata2[i+1,]$Item
+  }
+}
+
+#data[150000,]
+#data[150001,]
+subdata3 = data[100001:150000,]
+for (i in 1:(nrow(subdata3)-1)) {
+  if ((subdata3[i,]$Category != 'Extras') &
+      (subdata3[i+1,]$Category == 'Extras')) {
+    subdata3[i,]$extra = subdata3[i+1,]$Item
+  }
+}
+
+# data[200000,]
+# data[200001,] # extra
+# data[200002,]
+subdata4 = data[150001:200001,]
+for (i in 1:(nrow(subdata4)-1)) {
+  if ((subdata4[i,]$Category != 'Extras') &
+      (subdata4[i+1,]$Category == 'Extras')) {
+    subdata4[i,]$extra = subdata4[i+1,]$Item
+  }
+}
+
+subdata5 = data[200002:nrow(data),]
+for (i in 1:(nrow(subdata5)-1)) {
+  if ((subdata5[i,]$Category != 'Extras') &
+      (subdata5[i+1,]$Category == 'Extras')) {
+    subdata5[i,]$extra = subdata5[i+1,]$Item
+  }
+}
+
+newdata = rbind(subdata1,subdata2,subdata3,subdata4,subdata5)
+newdata_1 = newdata[newdata$Category != 'Extras',]
+newdata_1$Category = as.character(newdata_1$Category)
+newdata_1$Category = as.factor(newdata_1$Category)
+# try = newdata_1[newdata_1$Category == 'None',]
+levels(newdata_1$Category)
+write.csv(newdata_1,'data_with_extra_column.csv', row.names = FALSE)
+
+
+#### extract columns to use
+data_extra = read.csv('data_with_extra_column.csv')
+extra_trans = data_extra[!is.na(data_extra$extra),]
+extra_trans <- unite(extra_trans, product, 
+    c(Category, Item), remove = FALSE)
+extra_trans_out = extra_trans %>% select(product,extra)
+write.csv(extra_trans_out,
+    'extras_trans_data_2columns.csv', row.names = FALSE)
+```
+
+Then we run the association rules based on the data we get.
+```{r,warning=FALSE, message=FALSE,results='hide'}
+item_trans_extra = read.transactions("extras_trans_data_2columns.csv", 
+    format = "basket", sep = ",", rm.duplicates = TRUE, header = TRUE)
+#inspect(item_trans_extra[1:10])
+```
+
+**For Almond:**
+```{r,warning=FALSE, message=FALSE,results='hide'}
+# Almond - latte lg, cappucino, cortado, latte sm, tea chai
+rules_almond <- apriori(item_trans_extra, parameter = list(supp = 0.004, 
+    conf = 0.3, minlen = 2), appearance = list(rhs = 'Almond'))
+rules_almond_lift = sort(rules_almond,by='lift',decreasing = TRUE)
+```
+```{r,warning=FALSE, message=FALSE}
+inspect(rules_almond_lift)
+```
+
+**Interpretation:** Almond always comes together with Latte, Cappucino and Cortado.
+
+**For Extra Shot:**
+```{r,warning=FALSE, message=FALSE,results='hide'}
+rules_shot <- apriori(item_trans_extra, parameter = list(supp = 0.0015, 
+    conf = 0.18, minlen =2), appearance = list(rhs = 'Extra Shot'))
+rules_shot_lift = sort(rules_shot,by='lift',decreasing = TRUE)
+```
+```{r,warning=FALSE, message=FALSE}
+inspect(rules_shot_lift)
+```
+
+**Interpretation:** Extra shot always comes together with Drip and Chai Tea.
+
+**For Ice:**
+```{r,warning=FALSE, message=FALSE,results='hide'}
+rules_ice <- apriori(item_trans_extra, parameter = list(supp = 0.01, 
+    conf = 0.6, minlen = 2), appearance = list(rhs = 'Ice'))
+rules_ice_lift = sort(rules_ice,by='lift',decreasing = TRUE)
+```
+```{r,warning=FALSE, message=FALSE}
+inspect(rules_ice_lift)
+```
+
+**Interpretation:** Ice always comes together with drip, tea, americano, espresso and mocha. Especially, drip and tea have an extremely high confidence above 0.9, which means when people buy these drinks, mostly they add ice.
+
+**For Oat:**
+```{r,warning=FALSE, message=FALSE,results='hide'}
+rules_oat <- apriori(item_trans_extra, parameter = list(supp = 0.001, 
+    conf = 0.001, minlen = 2), appearance = list(rhs = 'Oat'))
+rules_oat_lift = sort(rules_oat,by='lift',decreasing = TRUE)
+```
+```{r,warning=FALSE, message=FALSE}
+inspect(rules_oat_lift)
+```
+
+**Interpretation:** Oat always comes together with Chai Tea, Latte and Cappucino.
+
+**For Soy:**
+```{r,warning=FALSE, message=FALSE,results='hide'}
+rules_soy <- apriori(item_trans_extra, parameter = list(supp = 0.005, 
+    conf = 0.001, minlen =2 ), appearance = list(rhs = 'Soy'))
+rules_soy_lift = sort(rules_soy,by='lift',decreasing = TRUE)
+```
+```{r,warning=FALSE, message=FALSE}
+inspect(rules_soy_lift)
+```
+
+**Interpretation:** Soy always comes together with Latte and Capuccino.
+
+
+
+
+# Recommendations
+
+We will propose strategies in 2 directions: promoting member loyalty and the increse the average sales by operational change in opending hours and menu.
+
+## Memberships
+### Members Exclusive Free/Discount Extras in the Afternoons
+
+In previous analysis, we found out members of Central Perk churn quickly after signing up. However, we are not sure if they no longer buy coffee from Central Perk or they just don't make use of their membership since they are not incentivized to do so. If they are actually members that continue to make purchases, Central Perk loses the opportunity to track more customer data and plan accordingly.
+
+Therefore, we recommend Central Perk offer free extras in the afternoon exclusive to members. First, afternoon is the off-peak hours for coffee and Central Perk may smooth the demand by attracting extra customers during afternoon. Second, the free/discount extras: half price shot, free soy, almond, oat and ice cost extremely low. A shot costs about 10 cents, so giving it away at half price will still alow them to net $0.90 in profit on each pump. 
+
+Morevoer, we expect that the "hidden members" will utilize their membership in order to earn the offer. This will allow Central Perk to keep track of their members, and develop customized marketing plans afterwards.
+
+The possible draw back for this strategy is that it will alienate the customers who purchase coffee during lunch break. However, we observe that people usually purchase food with coffee during afternoon, so shifing these customers to afternoon could even increase the average transaction value.
+
+
+## Benefits for loyal members and incentives to keep customers coming back
+
+The idea of incentivizing your regulars with perks and benefits to encourage more repeat visits and upgrades is not unique and has proven effective for nearly every other successful chain in the industry.
+
+Caribou Perks gives members a free drink of any size and any value on their second trip. In addition, members continue to earn 2 points for every purchase after the first towards free items.
+https://rewards.cariboucoffee.com/
+
+Starbucks gives members free refills.
+https://www.starbucks.com/rewards/
+
+Joe Coffee, an NYC staple lets you use their app to order and to earn reward points towards free coffee.
+https://joe.coffee/
+
+"Gregulars" at Gregory's coffee shop in NYC earn \$5 for every $50 they spend at the shop.
+https://www.gregoryscoffee.com/gregulars
+
+## Operational Changes
+
+### Introduce More Seasonal Drinks
+Unless there is some specific hipster marketing around simplicity that the shop is expressly known for in the NYC marketplace. And even if that branding is present outside our dataset, it still makes sense for the shop to be introducing more seasonal offerings. In the first three months open, 5% of sales per month were all lemonade, but the offering disappeared in the fall of 2016 and never made a return. This represents a lost sales opportunity that could be easily recouped. 
+
+The additional showings of increased sales of ice as an extra and of other beverages similar to lemonade, like perrier and san peligrino suggest that there is an existing demand for more cool and refreshing beverage offerings starting in the spring. In addition to an increase in demand for cold beverages in the fall, as we look at drinks like hot chocolate, we see that demand switch direction again each fall as consumers move toward hot beverage offerings once again.
+
+This aligns with what we already know about the industry at large as well where Starbucks introduces frappuchinos every Spring and launches their newsworthy^1^ Pumpkin Spice Latte every Fall. Thus we recommend introducing additional beverages in Spring and Fall specifically for short periods of time to meet these demands.
+1. https://www.youtube.com/watch?v=MkftR7Ihlko
+
+
+
+
+## Open 30 minutes early at 6:30 AM
+If we assume that the current upward trend in average sales from 7 am to 8 am is an outgrowth of a potential trend of would be consumers from 6 am to 7, the potential average sales lost in that first half hour is around \$43. We can estimate the same amount by looking at the average sales in the first 10 minutes of the morning and even assuming a conservative rate of sales where the previous half hour accounts for an equivalent of what is made in the first 10 min of the 7 am hour on average, we estimate an additional \$42 in revenue. This conservative estimate justifies at least the $8 it would cost to pay an employee for the extra 30 minutes of work that day, based on the currrent NYC min wage. Thus at a most conservative estimate testing opening earlier by half an hour for 3 months suggests that the store will not lose money in the test period.
+
+Additionally we find that the average purchase price in the first 10 minutes is much lower than the average for the rest of the day.  Average purchase in the morning in the first few minutes after opening is currently \$3.70. Profit of which is $0.75. Average purchase price for the total day is \$5.23.  A profit of \$1.05. This suggests that those first customers were perhaps waiting for the doors to open, or that the line is too long and they are now in a rush to get to work or catch a train and don't have time to wait for the more expensive drink they really wanted originally. Thus we expect that by opening 30 min earlier we will see an increase in transactions and an increase in amount per transaction.
+
+Keeping in mind that these estimates are extremely conservative, we recommend a test period of no less than 3 months where store hours are changed to open the store 30 minutes earlier at 6:30 AM. Opening the store will at a minimum likely cover current costs. More than likely though should demonstrate an increase in overall profit.
+
+
+
